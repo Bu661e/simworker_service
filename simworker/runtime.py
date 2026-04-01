@@ -9,6 +9,8 @@ from typing import Any, Sequence
 from simworker.base_environments import BaseEnvironmentHandles, create_default_tabletop_base_environment
 from simworker.table_environments import ensure_supported_table_environment_id, load_table_environment
 
+_CAMERA_CAPTURE_RENDER_STEPS = 2
+
 
 @dataclass(slots=True)
 class WorkerRuntime:
@@ -24,6 +26,7 @@ class WorkerRuntime:
     table_env_id: str | None = None
     # 这里直接保存 table_env 创建出的 handle；位姿和缩放统一在查询时直接从 handle 现查。
     objects: list[object] = field(default_factory=list)
+    artifact_counters: dict[str, int] = field(default_factory=dict)
     stream_statuses: dict[str, str] = field(default_factory=dict)
     shutdown_requested: bool = False
 
@@ -104,6 +107,14 @@ class WorkerRuntime:
             "objects": [self._build_object_transform_payload(scene_object) for scene_object in self.objects],
         }
 
+    def build_list_camera_payload(self) -> dict[str, Any]:
+        # 控制面只需要先知道有哪些 camera.id 可用，具体详情再走 get_camera_info。
+        camera_ids = sorted(self.cameras)
+        return {
+            "cameras": [{"id": camera_id} for camera_id in camera_ids],
+            "camera_count": len(camera_ids),
+        }
+
     @property
     def active_stream_count(self) -> int:
         return sum(1 for status in self.stream_statuses.values() if status == "running")
@@ -119,6 +130,12 @@ class WorkerRuntime:
         if self.base_environment is None:
             return {}
         return self.base_environment.cameras
+
+    @property
+    def camera_configs(self) -> dict[str, object]:
+        if self.base_environment is None:
+            return {}
+        return self.base_environment.camera_configs
 
     @property
     def robot(self) -> object | None:
@@ -150,6 +167,76 @@ class WorkerRuntime:
         self.table_env_id = table_env_id
         self.logger.info("Loaded table environment: %s (object_count=%s)", table_env_id, len(loaded_objects))
         return loaded_objects
+
+    def build_camera_info_payload(self, camera_id: str) -> dict[str, Any]:
+        import numpy as np
+
+        camera = self.cameras.get(camera_id)
+        if camera is None:
+            raise ValueError(f"camera.id {camera_id} does not exist")
+
+        camera_config = self.camera_configs.get(camera_id)
+        if not isinstance(camera_config, dict):
+            raise RuntimeError(f"camera.id {camera_id} metadata is missing")
+
+        if self.world is None:
+            raise RuntimeError("base environment world is not initialized")
+
+        # 拍快照前先推进少量渲染帧，保证 RGB / depth 与当前 stage 状态一致。
+        self._step_render_frames(_CAMERA_CAPTURE_RENDER_STEPS)
+        rgba_image = np.asarray(camera.get_rgba(), dtype=np.uint8)
+        current_frame = camera.get_current_frame(clone=True)
+        depth_image = current_frame.get("distance_to_image_plane")
+        if depth_image is None:
+            raise RuntimeError(
+                f"camera {camera_id} depth annotator did not return distance_to_image_plane data"
+            )
+        depth_image = np.asarray(depth_image, dtype=np.float32)
+
+        snapshot_tag = datetime.now().strftime("%H-%M-%S-%f")
+        rgb_ref = self._write_rgb_artifact(camera_id, snapshot_tag, rgba_image)
+        depth_ref = self._write_depth_artifact(camera_id, snapshot_tag, depth_image)
+
+        intrinsics_matrix = np.asarray(camera.get_intrinsics_matrix(), dtype=float)
+        camera_position, camera_orientation_wxyz = camera.get_world_pose(camera_axes="world")
+        width, height = camera.get_resolution()
+        return {
+            "camera": {
+                "id": camera_id,
+                "status": "ready",
+                "prim_path": camera_config["prim_path"],
+                "mount_mode": camera_config["mount_mode"],
+                "resolution": [int(width), int(height)],
+                "intrinsics": {
+                    "fx": float(intrinsics_matrix[0, 0]),
+                    "fy": float(intrinsics_matrix[1, 1]),
+                    "cx": float(intrinsics_matrix[0, 2]),
+                    "cy": float(intrinsics_matrix[1, 2]),
+                    "width": int(width),
+                    "height": int(height),
+                },
+                "pose": {
+                    "position_xyz_m": [
+                        float(camera_position[0]),
+                        float(camera_position[1]),
+                        float(camera_position[2]),
+                    ],
+                    "quaternion_wxyz": [
+                        float(camera_orientation_wxyz[0]),
+                        float(camera_orientation_wxyz[1]),
+                        float(camera_orientation_wxyz[2]),
+                        float(camera_orientation_wxyz[3]),
+                    ],
+                },
+                "rgb_image": {
+                    "ref": rgb_ref,
+                },
+                "depth_image": {
+                    "unit": "meter",
+                    "ref": depth_ref,
+                },
+            }
+        }
 
     def _ensure_unique_handle_object_ids(self, handles: Sequence[object]) -> None:
         object_ids: set[str] = set()
@@ -195,6 +282,43 @@ class WorkerRuntime:
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
         self.worker_status = "shutting_down"
+
+    def _step_render_frames(self, num_frames: int) -> None:
+        if self.world is None:
+            raise RuntimeError("base environment world is not initialized")
+        for _ in range(num_frames):
+            self.world.step(render=True)
+
+    def _allocate_artifact_id(self, artifact_kind: str) -> str:
+        # artifact id 在一次 worker 运行内单调递增，便于控制面日志和产物文件做关联。
+        next_index = self.artifact_counters.get(artifact_kind, 0) + 1
+        self.artifact_counters[artifact_kind] = next_index
+        return f"artifact-{artifact_kind}-{next_index:03d}"
+
+    def _build_artifact_ref(self, artifact_id: str, artifact_path: Path, content_type: str) -> dict[str, str]:
+        return {
+            "id": artifact_id,
+            "kind": "artifact_file",
+            "path": str(artifact_path),
+            "content_type": content_type,
+        }
+
+    def _write_rgb_artifact(self, camera_id: str, snapshot_tag: str, rgba_image: Any) -> dict[str, str]:
+        from PIL import Image
+
+        artifact_id = self._allocate_artifact_id("rgb")
+        artifact_path = self.artifacts_dir / f"{camera_id}_rgb_{snapshot_tag}.png"
+        rgb_image = rgba_image[:, :, :3] if rgba_image.shape[-1] == 4 else rgba_image
+        Image.fromarray(rgb_image, mode="RGB").save(artifact_path)
+        return self._build_artifact_ref(artifact_id, artifact_path, "image/png")
+
+    def _write_depth_artifact(self, camera_id: str, snapshot_tag: str, depth_image: Any) -> dict[str, str]:
+        import numpy as np
+
+        artifact_id = self._allocate_artifact_id("depth")
+        artifact_path = self.artifacts_dir / f"{camera_id}_depth_{snapshot_tag}.npy"
+        np.save(artifact_path, depth_image.astype(np.float32, copy=False))
+        return self._build_artifact_ref(artifact_id, artifact_path, "application/x-npy")
 
     def close(self) -> None:
         if self.world is not None:

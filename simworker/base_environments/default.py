@@ -28,6 +28,7 @@ _KEY_LIGHT_PRIM_PATH = "/World/Lights/KeyLight"
 class BaseEnvironmentHandles:
     world: object
     cameras: dict[str, object]
+    camera_configs: dict[str, object]
     robot: object
     table: object
 
@@ -46,6 +47,8 @@ def create_default_tabletop_base_environment(logger: logging.Logger) -> BaseEnvi
     create_new_stage()
     world = World(stage_units_in_meters=1.0)
     cameras: dict[str, object] = {}
+    # 运行时查询相机信息时除了 handle 本身，还需要知道 prim_path 和挂载方式。
+    camera_configs: dict[str, object] = {}
     try:
         world.scene.add_default_ground_plane()
 
@@ -85,6 +88,10 @@ def create_default_tabletop_base_environment(logger: logging.Logger) -> BaseEnvi
             camera_axes="world",
         )
         cameras[_TOP_CAMERA_ID] = top_camera
+        camera_configs[_TOP_CAMERA_ID] = {
+            "prim_path": _TOP_CAMERA_PRIM_PATH,
+            "mount_mode": "world",
+        }
 
         overview_camera = world.scene.add(
             Camera(
@@ -103,6 +110,10 @@ def create_default_tabletop_base_environment(logger: logging.Logger) -> BaseEnvi
             camera_axes="usd",
         )
         cameras[_OVERVIEW_CAMERA_ID] = overview_camera
+        camera_configs[_OVERVIEW_CAMERA_ID] = {
+            "prim_path": _OVERVIEW_CAMERA_PRIM_PATH,
+            "mount_mode": "usd",
+        }
 
         world.reset()
 
@@ -129,6 +140,7 @@ def create_default_tabletop_base_environment(logger: logging.Logger) -> BaseEnvi
     return BaseEnvironmentHandles(
         world=world,
         cameras=cameras,
+        camera_configs=camera_configs,
         robot=robot,
         table=table,
     )

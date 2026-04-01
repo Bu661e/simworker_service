@@ -5,7 +5,6 @@ from simworker.runtime import WorkerRuntime
 from simworker.table_environments import list_table_environment_ids
 
 _RECOGNIZED_UNIMPLEMENTED_COMMANDS = {
-    "get_camera_info",
     "start_camera_stream",
     "stop_camera_stream",
     "run_task",
@@ -26,9 +25,11 @@ class CommandDispatcher:
         self._handlers = {
             "hello": self._handle_hello,
             "list_table_env": self._handle_list_table_env,
+            "list_camera": self._handle_list_camera,
             "load_table_env": self._handle_load_table_env,
             "get_table_env_objects_info": self._handle_get_table_env_objects_info,
             "get_robot_status": self._handle_get_robot_status,
+            "get_camera_info": self._handle_get_camera_info,
             "shutdown": self._handle_shutdown,
         }
 
@@ -81,6 +82,12 @@ class CommandDispatcher:
             },
         )
 
+    def _handle_list_camera(self, request: ControlRequest) -> ControlResponse:
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload=self._runtime.build_list_camera_payload(),
+        )
+
     def _handle_load_table_env(self, request: ControlRequest) -> ControlResponse:
         table_env_id = _expect_non_empty_string(request.payload.get("table_env_id"), "payload.table_env_id")
         loaded_objects = self._runtime.load_table_env(table_env_id)
@@ -106,6 +113,17 @@ class CommandDispatcher:
         return ControlResponse.success(
             request_id=request.request_id,
             payload={"robot": self._runtime.build_robot_payload()},
+        )
+
+    def _handle_get_camera_info(self, request: ControlRequest) -> ControlResponse:
+        camera_payload = request.payload.get("camera")
+        if not isinstance(camera_payload, dict):
+            raise ValueError("payload.camera must be an object")
+
+        camera_id = _expect_non_empty_string(camera_payload.get("id"), "payload.camera.id")
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload=self._runtime.build_camera_info_payload(camera_id),
         )
 
     def _handle_shutdown(self, request: ControlRequest) -> ControlResponse:

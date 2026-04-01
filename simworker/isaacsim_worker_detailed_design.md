@@ -200,6 +200,8 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
   返回当前桌面环境对象的最新位姿和缩放信息。
 - `get_robot_status`
   获取机器人当前状态。
+- `list_camera`
+  返回当前 `worker` 可用的相机列表。
 - `get_camera_info`
   获取相机快照、内参、位姿和 artifact 引用信息。
 - `start_camera_stream`
@@ -814,7 +816,47 @@ session_dir/
 
 - `robot.status` 使用 `idle` 和 `busy` 两种状态。
 
-#### 7.6 `get_camera_info`
+#### 7.6 `list_camera`
+
+`list_camera` 用于返回当前 `worker` 可用的全部相机 `id`，供 API 层先发现可查询的相机，再按需调用 `get_camera_info` 或后续的视频流命令。
+
+请求示例：
+
+```json
+{
+  "request_id": "req-040",
+  "command_type": "list_camera",
+  "payload": {}
+}
+```
+
+成功响应示例：
+
+```json
+{
+  "request_id": "req-040",
+  "ok": true,
+  "payload": {
+    "cameras": [
+      {
+        "id": "table_overview"
+      },
+      {
+        "id": "table_top"
+      }
+    ],
+    "camera_count": 2
+  }
+}
+```
+
+推荐约定：
+
+- `cameras` 返回当前 `worker` 已创建并可访问的全部相机 `id`。
+- `camera_count` 返回当前可用相机数量，便于上层快速校验。
+- `list_camera` 只负责枚举相机，不返回图片、depth 或流信息。
+
+#### 7.7 `get_camera_info`
 
 `get_camera_info` 用于获取某个相机的当前快照、内参、位姿和 artifact 引用信息。根据第 3 节约束，控制面只返回引用，不直接携带图片和深度内容本体。
 
@@ -884,7 +926,7 @@ session_dir/
 - `camera.id` 不存在时，返回 `ok: false`。
 - 当前默认同时返回 RGB 和 depth 两种 artifact 引用；如果后续需要，可再扩展成按需返回。
 
-#### 7.7 `start_camera_stream`
+#### 7.8 `start_camera_stream`
 
 `start_camera_stream` 用于通知 `worker` 为某个相机启动一条持续更新的内部视频流。根据第 3.2 节约束，这里返回的是内部流引用信息和元数据，而不是对外 `MJPEG` / `WebRTC` 地址。
 
@@ -937,7 +979,7 @@ session_dir/
 - 对同一个相机重复调用 `start_camera_stream` 时，推荐直接返回现有运行中流的信息，使该命令具备幂等性。
 - `stream.ref` 只表示内部数据面引用，具体底层字段可在后续单独细化。
 
-#### 7.8 `stop_camera_stream`
+#### 7.9 `stop_camera_stream`
 
 `stop_camera_stream` 用于停止一条已经启动的内部相机流。
 
@@ -975,7 +1017,7 @@ session_dir/
 - `stream.id` 不存在时，返回 `ok: false`。
 - 停止后，相关内部流资源由 `worker` 负责清理。
 
-#### 7.9 `run_task`
+#### 7.10 `run_task`
 
 `run_task` 用于执行一个任务。按照第 4 节约束，`worker` 在执行任务期间会阻塞控制面直到任务完成或失败，因此这个命令的响应会在任务结束后返回。
 
@@ -1046,7 +1088,7 @@ session_dir/
 - 任务执行期间，控制面阻塞，但已经启动的视频流继续更新。
 - 任务执行期间，不额外提供流控制特例；如果某路流要停止，只能等当前任务返回后由控制面继续处理。
 
-#### 7.10 `shutdown`
+#### 7.11 `shutdown`
 
 `shutdown` 用于关闭当前 `worker`。在阻塞式任务模型下，如果当前正有长任务执行，`shutdown` 只能在该任务返回后被处理。
 
