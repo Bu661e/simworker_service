@@ -328,6 +328,7 @@ def _assert_simple_interface_sequence(
     *,
     table_env_id: str,
     expected_object_ids: set[str],
+    save_objects_info_json: bool = False,
 ) -> None:
     """按固定顺序走完 7 个简单接口，保证拍照时桌面环境已经完成导入。"""
     hello_response = _send_request(
@@ -418,6 +419,18 @@ def _assert_simple_interface_sequence(
     assert {item["id"] for item in table_env_objects_payload["objects"]} == expected_object_ids
     for object_payload in table_env_objects_payload["objects"]:
         _assert_object_transform_payload(object_payload)
+
+    if save_objects_info_json:
+        # 前两个综合案例会把 get_table_env_objects_info 的返回 payload 落盘，
+        # 方便后续人工核对桌面环境里对象的位姿与缩放信息。
+        saved_payload_dir = simworker_process.session_dir.parent / "saved_payloads"
+        saved_payload_dir.mkdir(parents=True, exist_ok=True)
+        saved_payload_path = saved_payload_dir / f"{table_env_id}_table_env_objects_info.json"
+        saved_payload_path.write_text(
+            json.dumps(table_env_objects_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        assert saved_payload_path.exists()
 
     # 拍照放在最后执行，人工看图片时就能直观看到桌面环境是否已真正加载进场景。
     expected_camera_prim_paths = {
@@ -548,6 +561,7 @@ def test_simworker_default_env_simple_interfaces_and_two_camera_snapshots(
         simworker_process,
         table_env_id="default",
         expected_object_ids={"red_cube", "blue_cube"},
+        save_objects_info_json=True,
     )
 
 
@@ -563,6 +577,7 @@ def test_simworker_ycb_env_simple_interfaces_and_two_camera_snapshots(
         simworker_process,
         table_env_id="ycb",
         expected_object_ids={"cracker_box_1", "mustard_bottle_1"},
+        save_objects_info_json=True,
     )
 
 

@@ -35,7 +35,8 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 - 创建 `session_dir` 与 `control_socket_path`。
 - 通过 Isaac Sim 的 `python.sh` 拉起 `worker`。
 - 用 `hello` 作为 ready probe，确认 `worker` 已经可用。
-- 对 API 层暴露 `hello`、`list_table_env`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`shutdown` 等高层方法。
+- 对 API 层暴露 `hello`、`list_table_env`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`run_task`、`shutdown` 等高层方法。
+- `SimManager` 可以保留启动超时、关闭超时和单次请求超时等外层兜底；如果某次请求在限定时间内一直没有返回，`SimManager` 直接终止当前 `worker` 进程，而不是再额外发送一条 `shutdown` 命令。
 - `SimManager` 只负责控制面，不负责 stream 数据面的读取实现；例如打开 shared memory、读取 `rgb24` 帧、解析 `latest_frame_v1` header、封装 reader SDK 等，都应由 API 层自行处理。
 
 推荐用法示例如下：
@@ -319,9 +320,13 @@ session_dir/
 
 - `worker` 在执行任务期间不会继续读取和处理新的控制命令。
 - `run_task` 的最终响应会在任务完成或失败后返回。
+- 同一时刻只允许有一个任务在执行。
 - 如果当前已有相机流在运行，任务执行期间这些视频流仍然继续更新。
 - 也就是说，阻塞的是控制面，不是已经启动的数据面流。
 - `shutdown`、`hello`、`get_robot_status`、`stop_camera_stream` 等命令在任务执行期间都只能等待任务返回后再处理。
+- `task.code` 被视为完全受信的 Python 代码；当前设计不额外引入沙箱、权限裁剪或安全隔离。
+- `run_task` 的失败响应不区分 `error_code`；调用方只需要读取 `error_message`。
+- 当前设计暂不定义任务超时；如果任务代码长时间不返回，控制面就会持续阻塞等待。
 
 #### 4.1 `world.step` 的归属
 
@@ -338,9 +343,10 @@ session_dir/
 1. `worker` 内部维护一个唯一的主循环。
 2. 主循环优先监听控制 socket，按顺序执行收到的控制命令。
 3. 当主循环暂时没有收到新的控制命令时，进入一次 idle tick。
-4. idle tick 中如果发现当前存在活跃 stream，且到了刷新周期，才调用一次 `world.step(render=True)`。
-5. step 完成后，读取相关相机数据并覆盖写入 latest-frame buffer。
-6. 如果未来接入 `run_task`，任务控制器也必须挂接在这个唯一主循环上，而不是再拆出第二个执行进程或第二套 step 循环。
+4. idle tick 中如果当前有任务在执行，则必须持续调用 `world.step(render=True)` 推进仿真。
+5. 如果当前没有任务在执行，但存在活跃 stream 且到了刷新周期，也调用一次 `world.step(render=True)`。
+6. step 完成后，如果当前有需要刷新的 stream，再读取相机数据并覆盖写入 latest-frame buffer。
+7. `run_task` 的任务控制器也必须挂接在这个唯一主循环上，而不是再拆出第二个执行进程或第二套 step 循环。
 
 这种设计下：
 
@@ -355,14 +361,19 @@ session_dir/
 while worker_running:
     apply_pending_commands()
 
-    if current_task is not None:
-        current_task.tick()
+    should_step_for_task = current_task is not None
+    should_step_for_stream = stream_refresh_due(active_streams)
 
-    world.step(render=True)
+    if should_step_for_task or should_step_for_stream:
+        if current_task is not None:
+            current_task.tick()
 
-    for stream in active_streams:
-        frame = capture_camera_frame(stream.camera_id)
-        stream.write_latest_frame(frame)
+        world.step(render=True)
+
+        if should_step_for_stream:
+            for stream in active_streams:
+                frame = capture_camera_frame(stream.camera_id)
+                stream.write_latest_frame(frame)
 
     if current_task is not None and current_task.is_finished():
         finalize_task_result(current_task)
@@ -373,7 +384,11 @@ while worker_running:
 
 ```python
 def handle_run_task(request):
-    task = install_task_controller(request.payload["task"])
+    task = install_task_controller(
+        task_id=request.payload["task"]["id"],
+        task_code=request.payload["task"]["code"],
+        task_objects=request.payload["task"]["objects"],
+    )
     wait_until_task_finished(task)
     return build_task_response(task)
 ```
@@ -383,6 +398,9 @@ def handle_run_task(request):
 - `handle_run_task(...)` 本身不负责循环调用 `world.step(...)`。
 - camera stream 的后台更新逻辑也不负责循环调用 `world.step(...)`。
 - 真正拥有 `world.step(...)` 的是 `worker` 内部唯一的 simulation loop。
+- `task.code` 在受控环境里执行后，必须提供统一入口 `run(robot, objects)`。
+- 传给 `run(robot, objects)` 的 `objects` 就是请求里给出的原始 `task.objects`，保持 `list[dict]` 结构。
+- `run_task` 在执行时只使用这份外部快照，不依赖 `worker` 内部对象查询接口的数据，也不会在执行前替换为内部实时对象状态。
 
 ### 5. worker 日志与产物目录
 
@@ -821,7 +839,9 @@ session_dir/
 这里需要特别强调：
 
 - 对 `physics.mode = "dynamic"` 的 `usd_asset`，返回的 `pose` 应理解为“当前世界位姿”，而不是最初请求里的生成位姿。
-- 这对可抓取 YCB 物体尤其重要：物体在落桌、碰撞稳定后，`pose` 可能与请求中的初始值略有偏差；`run_task`、抓取规划和可视化都应以这里返回的最新位姿为准。
+- 这对可抓取 YCB 物体尤其重要：物体在落桌、碰撞稳定后，`pose` 可能与请求中的初始值略有偏差；如果上层是基于 simworker 当前场景做抓取规划，应优先使用这里返回的最新位姿。
+- `get_table_env_objects_info` 的返回值和 `run_task` 的执行输入是两件独立的事。
+- `run_task` 执行时只使用外部传入的 `task.objects` 快照；即使 `worker` 内部场景里存在对象实时状态，也不会自动读取、合并或替换到任务代码看到的 `objects` 中。
 
 #### 7.5 `get_robot_status`
 
@@ -1074,13 +1094,21 @@ session_dir/
 
 `run_task` 用于执行一个任务。按照第 4 节约束，`worker` 在执行任务期间会阻塞控制面直到任务完成或失败，因此这个命令的响应会在任务结束后返回。
 
-这里执行一个任务，当前协议约定直接向 `worker` 发送一段任务代码，由 `worker` 在受控环境中执行 `run()`。
+这里执行一个任务，当前协议约定直接向 `worker` 发送一段任务代码以及一份对象快照，由 `worker` 在预置执行上下文中直接执行 `run(robot, objects)`。
 
 对 `run_task` 有一个特殊约定：
 
-- `task.codex` 是任务代码字符串。
-- 任务代码中应提供统一入口函数 `run()`。
-- `worker` 负责记录任务 `id`、执行状态、执行时间以及任务结果。
+- `task.code` 是任务代码字符串。
+- `task.objects` 是任务执行输入，结构保持为 `list[dict]`。
+- 任务代码中必须提供统一入口函数 `run(robot, objects)`。
+- `worker` 会提前准备好预置的高层 `robot` 原子动作 API，再把 `robot` 和请求中的原始 `task.objects` 一起传给 `run(robot, objects)`。
+- `run_task` 执行时只认请求中的 `task.objects`；任务代码看到的对象快照就是请求里传入的内容。
+- `worker` 不会在执行前去查询 `get_table_env_objects_info`，也不会把内部实时对象状态合并、覆盖或替换到 `task.objects` 上。
+- `robot` API 的实现必须与 `worker` 的唯一主循环协作，保证任务执行期间视频流继续推帧。
+- `task.code` 被视为完全受信的 Python 代码；当前设计直接执行，不额外做沙箱隔离。
+- `run(robot, objects)` 不定义协议层返回值；成功响应里的 `task.result` 当前固定为 `null`。
+- 当前设计暂不定义任务超时；只要 `run(robot, objects)` 还没有结束，控制面就继续等待。
+- 这不影响 API 层做外层请求超时兜底；如果 `SimManager` 等待单次请求超过设定时限，应直接终止当前 `worker` 进程，而不是再发送一条 `shutdown` 命令，因为此时控制面仍被前一个请求阻塞。
 
 请求示例：
 
@@ -1091,7 +1119,51 @@ session_dir/
   "payload": {
     "task": {
       "id": "task-001",
-      "code": "def run():\\n    return {}"
+      "objects": [
+        {
+          "id": "red_cube",
+          "pose": {
+            "position_xyz_m": [
+              0.16000044345855713,
+              0.22000035643577576,
+              1.5399998426437378
+            ],
+            "quaternion_wxyz": [
+              1.0,
+              -1.1649311772998772e-06,
+              1.4712445590703283e-06,
+              1.5434716837958717e-09
+            ]
+          },
+          "scale_xyz": [
+            0.07999999821186066,
+            0.07999999821186066,
+            0.07999999821186066
+          ]
+        },
+        {
+          "id": "blue_cube",
+          "pose": {
+            "position_xyz_m": [
+              0.3200005292892456,
+              -0.1399995982646942,
+              1.5399998426437378
+            ],
+            "quaternion_wxyz": [
+              1.0,
+              -1.4223320476958179e-06,
+              1.5484991990888375e-06,
+              9.343960272190088e-08
+            ]
+          },
+          "scale_xyz": [
+            0.07999999821186066,
+            0.07999999821186066,
+            0.07999999821186066
+          ]
+        }
+      ],
+      "code": "def run(robot, objects):\\n    red_cube = next(obj for obj in objects if obj['id'] == 'red_cube')\\n    blue_cube = next(obj for obj in objects if obj['id'] == 'blue_cube')\\n    target_center_z = (\\n        blue_cube['pose']['position_xyz_m'][2]\\n        + (blue_cube['scale_xyz'][2] / 2)\\n        + (red_cube['scale_xyz'][2] / 2)\\n        + 0.03\\n    )\\n\\n    robot.pick_and_place(\\n        pick_position=red_cube['pose']['position_xyz_m'],\\n        place_position=[\\n            blue_cube['pose']['position_xyz_m'][0],\\n            blue_cube['pose']['position_xyz_m'][1],\\n            target_center_z,\\n        ],\\n        rotation=None,\\n    )\\n"
     }
   }
 }
@@ -1107,7 +1179,7 @@ session_dir/
     "task": {
       "id": "task-001",
       "status": "succeeded",
-      "result": {},
+      "result": null,
       "started_at": "2026-04-01T10:00:00Z",
       "finished_at": "2026-04-01T10:00:12Z"
     }
@@ -1126,7 +1198,7 @@ session_dir/
     "task": {
       "id": "task-001",
       "status": "failed",
-      "result": {}
+      "result": null
     }
   }
 }
@@ -1135,8 +1207,13 @@ session_dir/
 推荐约定：
 
 - 如果当前基础环境尚未初始化，返回 `ok: false`。
-- 如果 `task.id` 或 `task.codex` 缺失，返回 `ok: false`。
-- 如果 `task.codex` 不能编译或没有提供 `run()`，返回 `ok: false`。
+- 如果 `task.id`、`task.objects` 或 `task.code` 缺失，返回 `ok: false`。
+- 如果 `task.code` 不能编译，或没有提供 `run(robot, objects)`，返回 `ok: false`。
+- `task.objects` 在协议层保持 `list[dict]` 结构；任务代码自己负责按 `id` 查找需要的对象。
+- `task.objects` 是外部任务输入快照；`run_task` 的执行语义不依赖 `worker` 内部对象信息接口，也不要求调用方事先先调一次 `get_table_env_objects_info`。
+- 当前同一时刻只允许执行一个任务。
+- `run_task` 的失败响应只返回 `error_message`，不再细分额外 `error_code` 字段。
+- 当前设计暂不支持任务超时控制。
 - 当前设计不支持 `cancel_task`。
 - 任务执行期间，控制面阻塞，但已经启动的视频流继续更新。
 - 任务执行期间，不额外提供流控制特例；如果某路流要停止，只能等当前任务返回后由控制面继续处理。
@@ -1183,7 +1260,7 @@ session_dir/
 - `worker`
   负责 Isaac Sim 初始化、仿真执行、桌面对象管理、相机采集、任务推进和原始视频帧生产。
 - `SimManager`
-  负责进程拉起、socket 连接、命令编排、超时控制、session 生命周期管理和对上层 API 提供统一抽象。
+  负责进程拉起、socket 连接、命令编排、启动/关闭/请求级超时兜底、session 生命周期管理和对上层 API 提供统一抽象；其中请求超时后的兜底方式是直接结束 `worker` 进程，而不是再补发 `shutdown`。
 - API 服务
   负责 HTTP 对外接口、鉴权、前端可见地址生成和最终响应聚合。
 

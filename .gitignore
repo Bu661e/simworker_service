@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 simworker/.pytest_tmp/
+simworker/pytest_runs/
 .pytest_tmp/
 
 # 本地产生的覆盖率与测试产物
