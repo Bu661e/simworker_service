@@ -29,13 +29,30 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 
 当前仓库内建议 API 层直接复用 `simworker/sim_manager.py` 中的 `SimManager`，而不是自行重复实现一套 `subprocess + socket` 管理逻辑。
 
+这里再补一个边界约定：
+
+- API 层通过 `SimManager` 只使用显式高层方法，例如 `load_table_env("default")`、`get_camera_info("table_top")`、`run_task(task_id=..., objects=..., code=...)`。
+- API 层不应直接构造控制协议请求 JSON，也不应自己管理 `request_id`。
+
+当前 `SimManager` 额外提供以下进程生命周期方法，供 API 层直接使用：
+
+- `start()` / `ensure_started()`
+  拉起 `worker` 并完成 ready probe。
+- `is_running()`
+  查询当前 `worker` 进程与控制 socket 是否仍然可用。
+- `shutdown()`
+  发送一条协议级优雅关闭命令，并等待 `worker` 正常退出。
+- `close()`
+  作为 API 层兜底清理入口；优先尝试优雅关闭，必要时最终直接回收子进程句柄。
+
 `SimManager` 的职责建议固定为：
 
 - 维护 API 层全局唯一的一份 `worker` 进程句柄。
 - 创建 `session_dir` 与 `control_socket_path`。
 - 通过 Isaac Sim 的 `python.sh` 拉起 `worker`。
 - 用 `hello` 作为 ready probe，确认 `worker` 已经可用。
-- 对 API 层暴露 `hello`、`list_table_env`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`run_task`、`shutdown` 等高层方法。
+- 对 API 层暴露 `hello`、`list_table_env`、`list_api`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`run_task`、`shutdown` 等高层方法。
+- API 层只向这些高层方法传业务参数，`SimManager` 内部负责组装控制协议 JSON。
 - `SimManager` 可以保留启动超时、关闭超时和单次请求超时等外层兜底；如果某次请求在限定时间内一直没有返回，`SimManager` 直接终止当前 `worker` 进程，而不是再额外发送一条 `shutdown` 命令。
 - `SimManager` 只负责控制面，不负责 stream 数据面的读取实现；例如打开 shared memory、读取 `rgb24` 帧、解析 `latest_frame_v1` header、封装 reader SDK 等，都应由 API 层自行处理。
 
@@ -52,6 +69,7 @@ sim_manager = SimManager(
 
 sim_manager.hello()
 sim_manager.list_table_env()
+api_text = sim_manager.list_api()
 sim_manager.list_camera()
 sim_manager.load_table_env("default")
 camera_info = sim_manager.get_camera_info("table_top")
@@ -228,6 +246,7 @@ sim_manager.stop_camera_stream(stream_info["stream"]["id"])
 - 写入类请求中的 `pose` 默认使用 `position_xyz_m + rotation_rpy_deg`。
 - 查询类响应中的 `pose` 默认使用 `position_xyz_m + quaternion_wxyz`。
 - 这条规则与当前旧代码保持一致：内部配置和挂载时常用欧拉角，对外返回世界位姿时统一返回四元数。
+- 需要注意：当前已经实现的控制命令里并没有通用“写入 pose”接口；这里的写入/查询约定更多是协议层通用设计说明，以及给后续扩展保留的命名规则。
 
 #### 2.5 推荐命令集合
 
@@ -235,6 +254,8 @@ sim_manager.stop_camera_stream(stream_info["stream"]["id"])
   获取 `worker` 当前整体状态。
 - `list_table_env`
   返回当前 `worker` 支持加载的桌面环境列表。
+- `list_api`
+  返回当前 `worker` 暴露给任务代码的 robot API 说明文本。
 - `load_table_env`
   按 `table_env_id` 加载一套预定义桌面物体。
 - `get_table_env_objects_info`
@@ -321,86 +342,78 @@ session_dir/
 - `worker` 在执行任务期间不会继续读取和处理新的控制命令。
 - `run_task` 的最终响应会在任务完成或失败后返回。
 - 同一时刻只允许有一个任务在执行。
-- 如果当前已有相机流在运行，任务执行期间这些视频流仍然继续更新。
-- 也就是说，阻塞的是控制面，不是已经启动的数据面流。
+- 如果当前已有相机流在运行，且任务代码通过 robot API 持续推进仿真，这些视频流会继续更新。
+- 也就是说，阻塞的是控制面；数据面能否继续刷新，取决于任务执行路径是否仍在推进仿真。
 - `shutdown`、`hello`、`get_robot_status`、`stop_camera_stream` 等命令在任务执行期间都只能等待任务返回后再处理。
 - `task.code` 被视为完全受信的 Python 代码；当前设计不额外引入沙箱、权限裁剪或安全隔离。
 - `run_task` 的失败响应不区分 `error_code`；调用方只需要读取 `error_message`。
 - 当前设计暂不定义任务超时；如果任务代码长时间不返回，控制面就会持续阻塞等待。
+- 当前实现中，`run_task` 是在命令处理函数里直接同步执行 `run(robot, objects)`，而不是先注册一个后台任务控制器再由 idle tick 驱动。
+- 当前实现中，如果任务代码内部调用了会推进仿真的 robot API，例如 `robot.pick_and_place(...)`，则这些 API 会在动作推进过程中主动触发 `world.step(render=True)`，并顺带刷新已启动的视频流。
 
 #### 4.1 `world.step` 的归属
 
-为了保证“任务执行”和“视频流更新”可以同时进行，同时又不破坏 Isaac Sim 世界状态一致性，`worker` 内必须遵循以下约束：
+为了保证“任务执行”和“视频流更新”可以同时进行，同时又不破坏 Isaac Sim 世界状态一致性，当前实现采用的是：
+
+- 一个 `Worker` 进程
+- 一个共享的 `WorkerRuntime`
+- 多个受控的 `world.step(...)` 入口
+- 所有这些入口都必须经过同一个 `runtime.simulation_lock`
+
+这里真正需要遵守的约束是：
 
 - `world.step(...)` 是对整个仿真世界的推进，而不是某个局部模块的方法。
-- 同一个 `worker` 进程内，`world.step(...)` 必须只有一个唯一调用点。
-- 不允许 `run_task` 的执行逻辑单独维护一套 `world.step(...)` 循环。
-- 不允许某个 camera stream 为了取帧再单独维护另一套 `world.step(...)` 循环。
-- `run_task` 和 camera stream 共享的是同一个仿真主循环产出的 step，而不是分别拥有自己的 step。
+- 不允许再拆出第二个 `Worker` 进程去负责 stream、任务或渲染。
+- 不允许开独立后台线程绕开 `WorkerRuntime` 直接调用 Isaac Sim API。
+- 所有推进世界、取相机数据、写 stream 的路径都必须复用同一个 runtime 锁和同一个 world。
 
-推荐实现为“单 Worker 进程主循环 + 多功能挂接”：
+当前代码里实际存在的 `world.step(...)` 入口主要有三类：
 
-1. `worker` 内部维护一个唯一的主循环。
-2. 主循环优先监听控制 socket，按顺序执行收到的控制命令。
-3. 当主循环暂时没有收到新的控制命令时，进入一次 idle tick。
-4. idle tick 中如果当前有任务在执行，则必须持续调用 `world.step(render=True)` 推进仿真。
-5. 如果当前没有任务在执行，但存在活跃 stream 且到了刷新周期，也调用一次 `world.step(render=True)`。
-6. step 完成后，如果当前有需要刷新的 stream，再读取相机数据并覆盖写入 latest-frame buffer。
-7. `run_task` 的任务控制器也必须挂接在这个唯一主循环上，而不是再拆出第二个执行进程或第二套 step 循环。
+1. `worker` 主循环空闲时的 stream idle tick
+   - 由 `UnixSocketControlServer.serve(..., idle_callback=runtime.publish_camera_stream_frames_if_due)` 驱动。
+   - 当当前没有控制命令在执行，且存在活跃 stream 且到了刷新周期时，会执行一次 `world.step(render=True)`，然后发布最新帧。
+2. 机器人动作 API 推进路径
+   - 例如 `robot.pick_and_place(...)` 在内部每一步都会调用 runtime 的 stepping helper。
+   - 这个 helper 会执行一次 `world.step(render=True)`，并在同一条路径上刷新当前活跃 stream。
+3. 快照或首帧预热路径
+   - 例如 `get_camera_info`、`start_camera_stream` 首帧返回前，会主动推进少量渲染帧，保证返回的数据不是空帧或旧帧。
 
-这种设计下：
+这种实现下需要特别理解三点：
 
-- `run_task` 的控制面请求仍然可以保持同步阻塞，直到任务完成才返回。
-- camera stream 仍然可以持续更新，因为它依赖的是同一个 `Worker` 主循环空闲 tick，而不是独立进程、独立线程或第二套 `world.step(...)`。
-- 实际联调中，如果把 stream 更新从主 `Worker` 执行路径拆到额外并行执行路径里，容易导致 `hello` 等控制命令超时；因此当前实现明确收敛为“一个 `Worker` 进程 + 一个主循环”。
-- 机器人状态、物体状态和相机画面来自同一个 step 序列，因此时序是一致的。
+- `run_task` 的控制面请求仍然保持同步阻塞，直到任务完成才返回。
+- `run_task` 执行期间，控制面 handler 会一直占住当前连接，因此 idle tick 不会继续刷新 stream。
+- 如果要让任务执行期间 stream 继续更新，任务代码必须通过会推进仿真的 robot API 来驱动世界前进；当前第一版里这主要体现在 `robot.pick_and_place(...)`。
 
-一个推荐的内部伪代码如下：
-
-```python
-while worker_running:
-    apply_pending_commands()
-
-    should_step_for_task = current_task is not None
-    should_step_for_stream = stream_refresh_due(active_streams)
-
-    if should_step_for_task or should_step_for_stream:
-        if current_task is not None:
-            current_task.tick()
-
-        world.step(render=True)
-
-        if should_step_for_stream:
-            for stream in active_streams:
-                frame = capture_camera_frame(stream.camera_id)
-                stream.write_latest_frame(frame)
-
-    if current_task is not None and current_task.is_finished():
-        finalize_task_result(current_task)
-        current_task = None
-```
-
-`run_task` 的控制面 handler 则更接近下面这种语义：
+一个更贴近当前实现的伪代码如下：
 
 ```python
 def handle_run_task(request):
-    task = install_task_controller(
-        task_id=request.payload["task"]["id"],
-        task_code=request.payload["task"]["code"],
-        task_objects=request.payload["task"]["objects"],
-    )
-    wait_until_task_finished(task)
-    return build_task_response(task)
+    task_code = request.payload["task"]["code"]
+    task_objects = request.payload["task"]["objects"]
+    run = compile_and_exec(task_code)["run"]
+    run(robot_api, task_objects)
+    return build_task_response()
+
+def robot_pick_and_place(...):
+    while not controller.is_done():
+        articulation_controller.apply_action(...)
+        runtime.step_world_for_robot_action()
+
+def runtime.step_world_for_robot_action():
+    with simulation_lock:
+        world.step(render=True)
+        publish_stream_frames_after_current_step_locked()
 ```
 
 这里要特别强调：
 
-- `handle_run_task(...)` 本身不负责循环调用 `world.step(...)`。
-- camera stream 的后台更新逻辑也不负责循环调用 `world.step(...)`。
-- 真正拥有 `world.step(...)` 的是 `worker` 内部唯一的 simulation loop。
+- `handle_run_task(...)` 自己不会额外起一个后台任务控制器。
+- camera stream 没有独立后台线程或第二个 `Worker` 进程。
+- 当前真正保证一致性的核心机制是“一个 `Worker` 进程 + 一个共享 runtime 锁”，而不是“代码里只允许存在一个 `world.step(...)` 调用位置”。
 - `task.code` 在受控环境里执行后，必须提供统一入口 `run(robot, objects)`。
 - 传给 `run(robot, objects)` 的 `objects` 就是请求里给出的原始 `task.objects`，保持 `list[dict]` 结构。
 - `run_task` 在执行时只使用这份外部快照，不依赖 `worker` 内部对象查询接口的数据，也不会在执行前替换为内部实时对象状态。
+- 如果任务代码只是纯 Python 计算而不调用会推进仿真的 robot API，那么控制面会阻塞，活跃 stream 也不会继续刷新；这是当前实现边界。
 
 ### 5. worker 日志与产物目录
 
@@ -419,7 +432,8 @@ session_dir/
 
 - `run_dir` 目录名使用本次运行启动时间。
 - `artifacts/` 用于保存图片、深度图和其他文件型产物。
-- `worker.log` 用于记录本次运行的业务日志和排障信息。
+- `run_dir/worker.log` 用于记录 `worker` 运行时的业务日志和排障信息。
+- `session_dir/simworker.log` 用于记录 `SimManager` 捕获到的子进程 stdout / stderr；启动失败或 socket 超时时通常先看这个文件。
 - 控制面协议消息不通过 stdout 传输，因此日志系统和控制协议互不污染。
 
 ### 6. 共享内存 latest-frame 数据面设计
@@ -519,9 +533,10 @@ session_dir/
 
 这里的边界再强调一次：
 
-- `stream.status` 由控制面维护，是流状态的唯一权威表达。
+- `start_camera_stream` / `stop_camera_stream` 的控制面响应会回显 `stream.status`。
+- `hello` 当前只返回 `streams.active_count`，不返回每条 stream 的详细状态。
 - 共享内存 `header` 只描述帧数据本身，不重复存放一份流状态。
-- 上层如果需要知道流是否仍然有效，应以控制面响应结果为准，而不是自行推断共享内存对象状态。
+- 当前协议没有单独的“查询某条 stream 详细状态”命令；如果上层后续需要精确感知 `running/error/stopped`，需要再扩展控制接口。
 
 这里建议把 `path` 设计成逻辑引用，而不是在文档里提前绑定某种具体 API 细节。`SimManager` / API 层只需要知道它能用该引用打开一段共享内存，并按 `layout` 解释内容即可。
 
@@ -531,17 +546,17 @@ session_dir/
 
 1. `start_camera_stream` 到达后，`worker` 为该相机创建或复用一条流。
 2. `worker` 创建共享内存对象，初始化 `header` 默认值。
-3. `worker` 将该流注册到内部主循环中；后续在主循环空闲 tick 里，如果到了刷新周期，则执行一次共享的 `world.step(render=True)`，并读取该相机最新帧持续覆盖写入 `frame_data`。
-4. 上层消费方根据 `stream.ref` 打开共享内存并读取最新帧。
-5. `stop_camera_stream` 到达后，`worker` 停止该流写入，并清理共享内存对象。
-6. `worker` 退出时，应清理自己创建的所有共享内存对象，避免遗留脏资源。
+3. 如果当前控制面空闲，`worker` 会在 idle tick 中按刷新周期执行一次共享的 `world.step(render=True)`，并把全部活跃 stream 的最新帧覆盖写入 `frame_data`。
+4. 如果当前正在执行会推进仿真的 robot API，例如 `robot.pick_and_place(...)`，活跃 stream 会在这条动作推进路径里继续刷新，而不是依赖 idle tick。
+5. 上层消费方根据 `stream.ref` 打开共享内存并读取最新帧。
+6. `stop_camera_stream` 到达后，`worker` 停止该流写入，并清理共享内存对象。
+7. `worker` 正常退出时，会在 runtime 的收尾逻辑里清理自己创建的所有共享内存对象，避免遗留脏资源。
 
 推荐约定：
 
 - 对同一个相机重复调用 `start_camera_stream` 时，优先复用已有流，而不是重复创建共享内存对象。
 - 同一时刻每个相机最多维护一条 latest-frame 流。
 - 当前设计不单独提供“查询流状态”命令；流状态只通过 `hello`、`start_camera_stream`、`stop_camera_stream` 等已有命令间接体现。
-- `worker` 异常退出后，`SimManager` 应具备补充清理能力，但主清理由 `worker` 负责。
 - 当前数据面按单读者设计，不为多读者并发访问定义额外协议保证。
 - camera stream 不应拥有独立于 simulation loop 的第二套 `world.step(...)` 调用点。
 - 更具体地说，当前实现不允许再拆出第二个 `Worker` 进程去负责 stream 刷新；stream 刷新必须留在唯一的 `Worker` 主循环内执行。
@@ -843,7 +858,40 @@ session_dir/
 - `get_table_env_objects_info` 的返回值和 `run_task` 的执行输入是两件独立的事。
 - `run_task` 执行时只使用外部传入的 `task.objects` 快照；即使 `worker` 内部场景里存在对象实时状态，也不会自动读取、合并或替换到任务代码看到的 `objects` 中。
 
-#### 7.5 `get_robot_status`
+#### 7.5 `list_api`
+
+`list_api` 用于返回当前 `worker` 对任务代码暴露的 robot API 说明文本。当前实现直接返回 `simworker/robots/api_reference.txt` 的原始文本内容，后续如果新增 robot API，应同步更新这份文件。
+
+请求示例：
+
+```json
+{
+  "request_id": "req-030",
+  "command_type": "list_api",
+  "payload": {}
+}
+```
+
+成功响应示例：
+
+```json
+{
+  "request_id": "req-030",
+  "ok": true,
+  "payload": {
+    "api": "当前 robot 可用 API 如下：\n\n1. pick_and_place(pick_position, place_position, rotation=None, grasp_offset=None)\n   - pick_position: 世界坐标系下的物体中心点，单位米，格式为 [x, y, z]\n   - place_position: 世界坐标系下的目标物体中心点，单位米，格式为 [x, y, z]\n   - rotation: 可选，世界坐标系下的 quaternion_wxyz；如果为 None，则使用内部默认抓取姿态\n   - grasp_offset: 可选，世界坐标系下的 [dx, dy, dz]；会同时作用在抓取阶段和放置阶段"
+  }
+}
+```
+
+推荐约定：
+
+- `list_api` 当前返回一个字符串，而不是 `list[str]`。
+- 返回内容直接来自 `simworker/robots/api_reference.txt`，后续新增 robot API 时应同步更新这份文件。
+- 上层如果要把 robot API 说明交给 LLM，优先使用这个接口返回的文本，而不是在别处重复维护一份 prompt 片段。
+- 控制协议响应里该字符串位于 `payload.api`；但 `SimManager.list_api()` 对 API 层直接返回这段字符串本身。
+
+#### 7.6 `get_robot_status`
 
 `get_robot_status` 用于返回当前机器人是否空闲或忙碌，以及它是否正在执行某个任务。
 
@@ -878,7 +926,7 @@ session_dir/
 
 - `robot.status` 使用 `idle` 和 `busy` 两种状态。
 
-#### 7.6 `list_camera`
+#### 7.7 `list_camera`
 
 `list_camera` 用于返回当前 `worker` 可用的全部相机 `id`，供 API 层先发现可查询的相机，再按需调用 `get_camera_info` 或后续的视频流命令。
 
@@ -918,7 +966,7 @@ session_dir/
 - `camera_count` 返回当前可用相机数量，便于上层快速校验。
 - `list_camera` 只负责枚举相机，不返回图片、depth 或流信息。
 
-#### 7.7 `get_camera_info`
+#### 7.8 `get_camera_info`
 
 `get_camera_info` 用于获取某个相机的当前快照、内参、位姿和 artifact 引用信息。根据第 3 节约束，控制面只返回引用，不直接携带图片和深度内容本体。
 
@@ -987,8 +1035,13 @@ session_dir/
 
 - `camera.id` 不存在时，返回 `ok: false`。
 - 当前默认同时返回 RGB 和 depth 两种 artifact 引用；如果后续需要，可再扩展成按需返回。
+- `mount_mode` 表示该相机在基础环境里采用的挂载/设姿方式，而不是 `get_camera_info.pose` 的返回坐标系。
+- 当前基础环境里：
+  - `table_top` 使用 `mount_mode = "world"`，通过 `set_world_pose(..., camera_axes="world")` 直接设置世界位姿。
+  - `table_overview` 使用 `mount_mode = "usd"`，通过 `set_local_pose(..., camera_axes="usd")` 设置本地位姿。
+- 无论 `mount_mode` 是什么，`get_camera_info.pose` 当前都统一返回相机的世界位姿。
 
-#### 7.8 `start_camera_stream`
+#### 7.9 `start_camera_stream`
 
 `start_camera_stream` 用于通知 `worker` 为某个相机启动一条持续更新的内部视频流。根据第 3.2 节约束，这里返回的是内部流引用信息和元数据，而不是对外 `MJPEG` / `WebRTC` 地址。
 
@@ -1047,12 +1100,13 @@ session_dir/
 - 当前只实现 `pixel_format = rgb24`，不提供 depth stream。
 - 当前同一时刻每个相机最多维护一条 stream。
 - 当前整个系统只有一个 `Worker` 进程。
-- 当前由这个唯一 `Worker` 进程的主循环统一推进控制命令处理、`world.step(render=True)` 和 stream 刷新；当主循环空闲且到达刷新周期时，才会刷新全部活跃 stream。
+- 当前由这个唯一 `Worker` 进程负责所有 Isaac Sim API 调用，不会再拆出第二个进程或后台线程去刷新 stream。
+- 当前控制面空闲时，活跃 stream 由 idle tick 刷新；任务执行期间，如果任务代码调用了会推进仿真的 robot API，则活跃 stream 由机器人动作推进路径刷新。
 - 当前不为 stream 额外创建第二个 `Worker` 进程，也不再依赖并行后台执行路径去调用 Isaac Sim API。
 - 当前 `stream.ref.path` 的实际格式为 `shm://<shared_memory_name>`，供 API 层后续打开共享内存对象使用。
 - `SimManager` 在这里的职责到返回 `stream.ref` 为止，不负责 shared memory 打开、帧读取、像素解码或任何 reader 封装。
 
-#### 7.9 `stop_camera_stream`
+#### 7.10 `stop_camera_stream`
 
 `stop_camera_stream` 用于停止一条已经启动的内部相机流。
 
@@ -1090,7 +1144,7 @@ session_dir/
 - `stream.id` 不存在时，返回 `ok: false`。
 - 停止后，相关内部流资源由 `worker` 负责清理。
 
-#### 7.10 `run_task`
+#### 7.11 `run_task`
 
 `run_task` 用于执行一个任务。按照第 4 节约束，`worker` 在执行任务期间会阻塞控制面直到任务完成或失败，因此这个命令的响应会在任务结束后返回。
 
@@ -1102,6 +1156,10 @@ session_dir/
 - `task.objects` 是任务执行输入，结构保持为 `list[dict]`。
 - 任务代码中必须提供统一入口函数 `run(robot, objects)`。
 - `worker` 会提前准备好预置的高层 `robot` 原子动作 API，再把 `robot` 和请求中的原始 `task.objects` 一起传给 `run(robot, objects)`。
+- 当前第一版 `robot` 只暴露 `pick_and_place(pick_position, place_position, rotation=None, grasp_offset=None)`。
+- `pick_position` 和 `place_position` 都按世界坐标系下的物体中心点解释，单位为米。
+- `rotation` 如果提供，按世界坐标系下的 `quaternion_wxyz` 解释；`None` 表示使用内部默认抓取姿态。
+- `grasp_offset` 如果提供，按世界坐标系下的 `[dx, dy, dz]` 解释，表示夹爪相对物体中心的固定偏移；这个偏移会同时作用在抓取阶段和放置阶段。
 - `run_task` 执行时只认请求中的 `task.objects`；任务代码看到的对象快照就是请求里传入的内容。
 - `worker` 不会在执行前去查询 `get_table_env_objects_info`，也不会把内部实时对象状态合并、覆盖或替换到 `task.objects` 上。
 - `robot` API 的实现必须与 `worker` 的唯一主循环协作，保证任务执行期间视频流继续推帧。
@@ -1163,7 +1221,7 @@ session_dir/
           ]
         }
       ],
-      "code": "def run(robot, objects):\\n    red_cube = next(obj for obj in objects if obj['id'] == 'red_cube')\\n    blue_cube = next(obj for obj in objects if obj['id'] == 'blue_cube')\\n    target_center_z = (\\n        blue_cube['pose']['position_xyz_m'][2]\\n        + (blue_cube['scale_xyz'][2] / 2)\\n        + (red_cube['scale_xyz'][2] / 2)\\n        + 0.03\\n    )\\n\\n    robot.pick_and_place(\\n        pick_position=red_cube['pose']['position_xyz_m'],\\n        place_position=[\\n            blue_cube['pose']['position_xyz_m'][0],\\n            blue_cube['pose']['position_xyz_m'][1],\\n            target_center_z,\\n        ],\\n        rotation=None,\\n    )\\n"
+      "code": "def run(robot, objects):\\n    red_cube = next(obj for obj in objects if obj['id'] == 'red_cube')\\n    blue_cube = next(obj for obj in objects if obj['id'] == 'blue_cube')\\n    target_center_z = (\\n        blue_cube['pose']['position_xyz_m'][2]\\n        + (blue_cube['scale_xyz'][2] / 2)\\n        + (red_cube['scale_xyz'][2] / 2)\\n        + 0.03\\n    )\\n\\n    robot.pick_and_place(\\n        pick_position=red_cube['pose']['position_xyz_m'],\\n        place_position=[\\n            blue_cube['pose']['position_xyz_m'][0],\\n            blue_cube['pose']['position_xyz_m'][1],\\n            target_center_z,\\n        ],\\n        rotation=None,\\n        grasp_offset=None,\\n    )\\n"
     }
   }
 }
@@ -1218,7 +1276,7 @@ session_dir/
 - 任务执行期间，控制面阻塞，但已经启动的视频流继续更新。
 - 任务执行期间，不额外提供流控制特例；如果某路流要停止，只能等当前任务返回后由控制面继续处理。
 
-#### 7.11 `shutdown`
+#### 7.12 `shutdown`
 
 `shutdown` 用于关闭当前 `worker`。在阻塞式任务模型下，如果当前正有长任务执行，`shutdown` 只能在该任务返回后被处理。
 
@@ -1252,6 +1310,7 @@ session_dir/
 
 - `worker` 返回成功响应后，应尽快关闭控制 socket 并退出进程。
 - 如果需要记录关闭原因，可以在后续为 `worker.metadata` 增加可选字段。
+- 当前正常关闭路径下，`worker` 会在最终收尾逻辑中关闭 stream、清理共享内存对象并关闭 `SimulationApp`。
 
 ### 8. 推荐的整体边界
 

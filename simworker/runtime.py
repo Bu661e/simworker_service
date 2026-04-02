@@ -4,12 +4,13 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 from simworker.base_environments import BaseEnvironmentHandles, create_default_tabletop_base_environment
 from simworker.camera_streams import CameraStreamRuntimeState, create_camera_stream_runtime_state
+from simworker.robots import FrankaRobotAPI
 from simworker.table_environments import ensure_supported_table_environment_id, load_table_environment
 
 _CAMERA_CAPTURE_RENDER_STEPS = 2
@@ -25,6 +26,7 @@ class WorkerRuntime:
     logger: logging.Logger
     simulation_app: object | None = None
     base_environment: BaseEnvironmentHandles | None = None
+    robot_api: FrankaRobotAPI | None = None
     worker_status: str = "starting"
     robot_status: str = "idle"
     current_task_id: str | None = None
@@ -65,6 +67,9 @@ class WorkerRuntime:
         try:
             self.simulation_app = self._bootstrap_simulation_app()
             self.base_environment = create_default_tabletop_base_environment(self.logger)
+            if self.robot is None:
+                raise RuntimeError("base environment robot is not initialized")
+            self.robot_api = FrankaRobotAPI(runtime=self, robot_handle=self.robot, logger=self.logger)
             self.worker_status = "ready"
             self.logger.info(
                 "Simworker runtime is ready (object_count=%s)",
@@ -357,10 +362,64 @@ class WorkerRuntime:
         self.shutdown_requested = True
         self.worker_status = "shutting_down"
 
+    def run_task(self, *, task_id: str, task_code: str, task_objects: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.robot_api is None:
+            raise RuntimeError("robot API is not initialized")
+        if self.current_task_id is not None:
+            raise RuntimeError(f"another task is already running: {self.current_task_id}")
+
+        compiled_code = compile(task_code, f"<simworker-task:{task_id}>", "exec")
+        task_namespace: dict[str, Any] = {
+            "__builtins__": __builtins__,
+            "__name__": "__simworker_task__",
+        }
+        exec(compiled_code, task_namespace, task_namespace)
+        run_callable = task_namespace.get("run")
+        if not callable(run_callable):
+            raise ValueError("payload.task.code must define a callable run(robot, objects)")
+
+        started_at = _utc_now_isoformat()
+        self.current_task_id = task_id
+        self.logger.info("Starting run_task task_id=%s object_count=%s", task_id, len(task_objects))
+        try:
+            result = run_callable(self.robot_api, task_objects)
+            if result is not None:
+                # 协议层当前不消费 run() 返回值，这里仅打日志，避免误以为结果会自动回传。
+                self.logger.info("run_task task_id=%s returned a value that will be ignored", task_id)
+        finally:
+            self.current_task_id = None
+
+        finished_at = _utc_now_isoformat()
+        self.logger.info("Completed run_task task_id=%s", task_id)
+        return {
+            "task": {
+                "id": task_id,
+                "status": "succeeded",
+                "result": None,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            }
+        }
+
+    def ensure_world_playing(self) -> None:
+        with self.simulation_lock:
+            self._ensure_world_playing_locked()
+
+    def step_world_for_robot_action(self) -> None:
+        # 机器人动作执行期间也必须继续沿用同一套世界推进逻辑，并按需刷新视频流。
+        with self.simulation_lock:
+            if self.world is None:
+                raise RuntimeError("base environment world is not initialized")
+
+            self._ensure_world_playing_locked()
+            self.world.step(render=True)
+            self._publish_stream_frames_after_current_step_locked(force=False)
+
     def _step_render_frames(self, num_frames: int) -> None:
         with self.simulation_lock:
             if self.world is None:
                 raise RuntimeError("base environment world is not initialized")
+            self._ensure_world_playing_locked()
             for _ in range(num_frames):
                 self.world.step(render=True)
 
@@ -383,47 +442,72 @@ class WorkerRuntime:
             if self.world is None:
                 return
 
-            running_streams = [
-                stream_state for stream_state in self.streams_by_id.values() if stream_state.status == "running"
-            ]
+            running_streams = self._get_running_streams_locked()
             if not running_streams:
                 return
 
             now = time.monotonic()
-            if not force and self.last_stream_publish_monotonic > 0.0:
-                if (now - self.last_stream_publish_monotonic) < _STREAM_LOOP_RENDER_PERIOD_SEC:
-                    return
-
-            self.last_stream_publish_monotonic = now
-            self._publish_latest_stream_frames_locked(running_streams)
-
-    def _publish_latest_stream_frames_locked(self, running_streams: Sequence[CameraStreamRuntimeState]) -> None:
-        with self.simulation_lock:
-            if self.world is None:
+            if not self._should_publish_running_streams_locked(now=now, force=force):
                 return
 
+            self._ensure_world_playing_locked()
             self.world.step(render=True)
-            for stream_state in running_streams:
-                camera = self.cameras.get(stream_state.camera_id)
-                if camera is None:
-                    stream_state.mark_error()
-                    self.logger.error(
-                        "Active stream camera no longer exists: stream_id=%s camera_id=%s",
-                        stream_state.stream_id,
-                        stream_state.camera_id,
-                    )
-                    continue
+            self._publish_stream_frames_after_current_step_locked(force=True, now=now, running_streams=running_streams)
 
-                try:
-                    rgba_image = self._capture_camera_rgba(camera)
-                    stream_state.write_rgb_frame(rgba_image)
-                except Exception:
-                    stream_state.mark_error()
-                    self.logger.exception(
-                        "Failed to publish latest frame for stream_id=%s camera_id=%s",
-                        stream_state.stream_id,
-                        stream_state.camera_id,
-                    )
+    def _ensure_world_playing_locked(self) -> None:
+        if self.world is None:
+            raise RuntimeError("base environment world is not initialized")
+        if hasattr(self.world, "is_playing") and not self.world.is_playing():
+            self.world.play()
+
+    def _get_running_streams_locked(self) -> list[CameraStreamRuntimeState]:
+        return [stream_state for stream_state in self.streams_by_id.values() if stream_state.status == "running"]
+
+    def _should_publish_running_streams_locked(self, *, now: float, force: bool) -> bool:
+        if force:
+            return True
+        if self.last_stream_publish_monotonic <= 0.0:
+            return True
+        return (now - self.last_stream_publish_monotonic) >= _STREAM_LOOP_RENDER_PERIOD_SEC
+
+    def _publish_stream_frames_after_current_step_locked(
+        self,
+        *,
+        force: bool,
+        now: float | None = None,
+        running_streams: Sequence[CameraStreamRuntimeState] | None = None,
+    ) -> None:
+        if running_streams is None:
+            running_streams = self._get_running_streams_locked()
+        if not running_streams:
+            return
+
+        publish_now = time.monotonic() if now is None else now
+        if not self._should_publish_running_streams_locked(now=publish_now, force=force):
+            return
+
+        self.last_stream_publish_monotonic = publish_now
+        for stream_state in running_streams:
+            camera = self.cameras.get(stream_state.camera_id)
+            if camera is None:
+                stream_state.mark_error()
+                self.logger.error(
+                    "Active stream camera no longer exists: stream_id=%s camera_id=%s",
+                    stream_state.stream_id,
+                    stream_state.camera_id,
+                )
+                continue
+
+            try:
+                rgba_image = self._capture_camera_rgba(camera)
+                stream_state.write_rgb_frame(rgba_image)
+            except Exception:
+                stream_state.mark_error()
+                self.logger.exception(
+                    "Failed to publish latest frame for stream_id=%s camera_id=%s",
+                    stream_state.stream_id,
+                    stream_state.camera_id,
+                )
 
     def _remove_stream_state(self, stream_state: CameraStreamRuntimeState) -> None:
         self.streams_by_id.pop(stream_state.stream_id, None)
@@ -479,6 +563,7 @@ class WorkerRuntime:
 
     def close(self) -> None:
         self._cleanup_all_streams()
+        self.robot_api = None
         if self.world is not None:
             try:
                 from isaacsim.core.api.world import World
@@ -526,3 +611,7 @@ def _configure_logger(log_path: Path) -> logging.Logger:
     logger.addHandler(stream_handler)
 
     return logger
+
+
+def _utc_now_isoformat() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

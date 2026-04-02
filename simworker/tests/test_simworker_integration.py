@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -15,6 +17,7 @@ import pytest
 
 from simworker.camera_streams import decode_latest_frame_header, latest_frame_header_size_bytes
 from simworker.protocol import recv_json_message, send_json_message
+from simworker.robots import get_robot_api_text
 
 _ENABLE_REAL_TEST_ENV = "SIMWORKER_RUN_ISAACSIM_TESTS"
 _WORKER_PYTHON_ENV = "SIMWORKER_TEST_PYTHON"
@@ -30,6 +33,8 @@ _STREAM_SAMPLE_COUNT = 3
 _EXPECTED_STREAM_FPS = 30.0
 _STREAM_FPS_MIN = 24.0
 _STREAM_FPS_MAX = 36.0
+_RUN_TASK_REQUEST_TIMEOUT_SEC = 180.0
+_RUN_TASK_DURING_FPS_MIN = 1.0
 
 
 @dataclass(frozen=True)
@@ -87,9 +92,14 @@ def _wait_for_socket(socket_path: Path, process: subprocess.Popen[str], log_path
     )
 
 
-def _send_request(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+def _send_request(
+    socket_path: Path,
+    request: dict[str, Any],
+    *,
+    timeout_sec: float = _REQUEST_TIMEOUT_SEC,
+) -> dict[str, Any]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(_REQUEST_TIMEOUT_SEC)
+        sock.settimeout(timeout_sec)
         sock.connect(str(socket_path))
         send_json_message(sock, request)
         response = recv_json_message(sock)
@@ -330,7 +340,7 @@ def _assert_simple_interface_sequence(
     expected_object_ids: set[str],
     save_objects_info_json: bool = False,
 ) -> None:
-    """按固定顺序走完 7 个简单接口，保证拍照时桌面环境已经完成导入。"""
+    """按固定顺序走完当前全部简单接口，保证拍照时桌面环境已经完成导入。"""
     hello_response = _send_request(
         simworker_process.socket_path,
         {
@@ -355,6 +365,25 @@ def _assert_simple_interface_sequence(
     returned_env_ids = {item["id"] for item in list_env_response["payload"]["table_envs"]}
     assert returned_env_ids == {"default", "ycb"}
     assert list_env_response["payload"]["table_env_count"] == 2
+
+    list_api_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-list-api",
+                "command_type": "list_api",
+                "payload": {},
+            },
+        ),
+        "req-list-api",
+    )
+    assert list_api_payload["api"] == get_robot_api_text()
+    # list_api 现在返回的是更详细的多行 API 说明文本，这里校验关键签名片段和参数说明是否存在。
+    assert "pick_and_place(" in list_api_payload["api"]
+    assert "pick_position: list[float]" in list_api_payload["api"]
+    assert "place_position: list[float]" in list_api_payload["api"]
+    assert "rotation: list[float] | None = None" in list_api_payload["api"]
+    assert "grasp_offset: list[float] | None = None" in list_api_payload["api"]
 
     list_camera_payload = _assert_success(
         _send_request(
@@ -552,6 +581,134 @@ def _assert_stream_frequency_and_save_samples(
     finally:
         shm.close()
     return shm_name
+
+
+def _measure_stream_fps(
+    stream_payload: dict[str, Any],
+    *,
+    duration_sec: float = 2.0,
+) -> float:
+    """
+    在不保存图片的前提下测一次当前 stream 的实际帧率，作为 run_task 前后的对照基线。
+    """
+    shm_name = _stream_ref_name(stream_payload["ref"]["path"])
+    shm = shared_memory.SharedMemory(name=shm_name, create=False)
+    try:
+        start_header, _ = _read_latest_stream_snapshot(shm, timeout_sec=5.0)
+        start_frame_id = int(start_header["frame_id"])
+        start_timestamp_ns = int(start_header["timestamp_ns"])
+        time.sleep(duration_sec)
+        end_header, _ = _wait_for_stream_frame_advance(
+            shm,
+            last_frame_id=start_frame_id,
+            timeout_sec=max(2.0, duration_sec + 1.0),
+        )
+        elapsed_sec = (int(end_header["timestamp_ns"]) - start_timestamp_ns) / 1_000_000_000.0
+        if elapsed_sec <= 0.0:
+            raise AssertionError("stream fps elapsed time must be positive")
+        return (int(end_header["frame_id"]) - start_frame_id) / elapsed_sec
+    finally:
+        shm.close()
+
+
+def _sample_streams_while_run_task_is_running(
+    *,
+    top_stream_payload: dict[str, Any],
+    overview_stream_payload: dict[str, Any],
+    output_dir: Path,
+    run_task_future: concurrent.futures.Future[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    在 run_task 执行期间，每秒保存一次双路流帧，并统计执行期间的帧率。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stream_payloads = {
+        "table_top": top_stream_payload,
+        "table_overview": overview_stream_payload,
+    }
+
+    shm_by_camera: dict[str, shared_memory.SharedMemory] = {}
+    start_headers: dict[str, dict[str, Any]] = {}
+    last_frame_ids: dict[str, int] = {}
+    samples_by_camera: dict[str, list[dict[str, Any]]] = {camera_id: [] for camera_id in stream_payloads}
+    latest_headers: dict[str, dict[str, Any]] = {}
+    try:
+        for camera_id, stream_payload in stream_payloads.items():
+            shm = shared_memory.SharedMemory(name=_stream_ref_name(stream_payload["ref"]["path"]), create=False)
+            shm_by_camera[camera_id] = shm
+            header, _ = _read_latest_stream_snapshot(shm, timeout_sec=5.0)
+            start_headers[camera_id] = header
+            latest_headers[camera_id] = header
+            last_frame_ids[camera_id] = int(header["frame_id"])
+
+        sample_index = 0
+        next_sample_monotonic = time.monotonic() + _STREAM_SAMPLE_INTERVAL_SEC
+        while not run_task_future.done():
+            now = time.monotonic()
+            sleep_sec = max(0.0, min(0.1, next_sample_monotonic - now))
+            time.sleep(sleep_sec)
+            if time.monotonic() < next_sample_monotonic:
+                continue
+
+            sample_index += 1
+            next_sample_monotonic += _STREAM_SAMPLE_INTERVAL_SEC
+            for camera_id, shm in shm_by_camera.items():
+                sample_header, frame_bytes = _wait_for_stream_frame_advance(
+                    shm,
+                    last_frame_id=last_frame_ids[camera_id],
+                    timeout_sec=2.0,
+                )
+                sample_path = output_dir / f"{camera_id}_during_task_{sample_index:02d}.png"
+                _save_stream_frame_png(
+                    frame_bytes,
+                    width=int(sample_header["width"]),
+                    height=int(sample_header["height"]),
+                    output_path=sample_path,
+                )
+                samples_by_camera[camera_id].append(
+                    {
+                        "sample_index": sample_index,
+                        "frame_id": int(sample_header["frame_id"]),
+                        "timestamp_ns": int(sample_header["timestamp_ns"]),
+                        "path": str(sample_path),
+                    }
+                )
+                last_frame_ids[camera_id] = int(sample_header["frame_id"])
+                latest_headers[camera_id] = sample_header
+
+        # 即使任务刚好在某个采样边界前结束，也补读一次最新头，方便统计整个任务窗口内的帧率。
+        for camera_id, shm in shm_by_camera.items():
+            latest_header, _ = _read_latest_stream_snapshot(shm, timeout_sec=2.0)
+            if int(latest_header["frame_id"]) > int(latest_headers[camera_id]["frame_id"]):
+                latest_headers[camera_id] = latest_header
+
+        metrics_by_camera: dict[str, dict[str, Any]] = {}
+        for camera_id in stream_payloads:
+            start_header = start_headers[camera_id]
+            end_header = latest_headers[camera_id]
+            elapsed_sec = (int(end_header["timestamp_ns"]) - int(start_header["timestamp_ns"])) / 1_000_000_000.0
+            if elapsed_sec <= 0.0:
+                raise AssertionError(f"{camera_id} run_task stream elapsed time must be positive")
+            observed_fps = (int(end_header["frame_id"]) - int(start_header["frame_id"])) / elapsed_sec
+            assert observed_fps >= _RUN_TASK_DURING_FPS_MIN, (
+                f"camera {camera_id} observed_fps={observed_fps:.2f} "
+                f"must stay above {_RUN_TASK_DURING_FPS_MIN:.1f} while run_task is executing"
+            )
+            metrics = {
+                "camera_id": camera_id,
+                "stream_id": stream_payloads[camera_id]["id"],
+                "observed_fps_during_run_task": observed_fps,
+                "sample_interval_sec": _STREAM_SAMPLE_INTERVAL_SEC,
+                "saved_sample_count": len(samples_by_camera[camera_id]),
+                "samples": samples_by_camera[camera_id],
+            }
+            metrics_path = output_dir / f"{camera_id}_during_run_task_metrics.json"
+            metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+            metrics_by_camera[camera_id] = metrics
+        return metrics_by_camera
+    finally:
+        for shm in shm_by_camera.values():
+            shm.close()
 
 
 def test_simworker_default_env_simple_interfaces_and_two_camera_snapshots(
@@ -752,3 +909,225 @@ def test_simworker_default_env_two_camera_snapshots_and_dual_streams(
     with pytest.raises(FileNotFoundError):
         orphan_shm = shared_memory.SharedMemory(name=overview_shm_name, create=False)
         orphan_shm.close()
+
+
+def test_simworker_default_env_run_task_keeps_dual_streams_publishing(
+    simworker_process: WorkerProcessHandle,
+) -> None:
+    _assert_simple_interface_sequence(
+        simworker_process,
+        table_env_id="default",
+        expected_object_ids={"red_cube", "blue_cube"},
+    )
+
+    run_task_stream_dir = simworker_process.session_dir.parent / "run_task_stream_samples"
+
+    top_stream_response = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-start-stream-table-top",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_top",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-run-task-start-stream-table-top",
+    )
+    top_stream_payload = top_stream_response["stream"]
+    _assert_stream_shared_memory_header(top_stream_payload)
+
+    overview_stream_response = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-start-stream-table-overview",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_overview",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-run-task-start-stream-table-overview",
+    )
+    overview_stream_payload = overview_stream_response["stream"]
+    _assert_stream_shared_memory_header(overview_stream_payload)
+
+    baseline_fps = {
+        "table_top": _measure_stream_fps(top_stream_payload),
+        "table_overview": _measure_stream_fps(overview_stream_payload),
+    }
+    for camera_id, observed_fps in baseline_fps.items():
+        assert _STREAM_FPS_MIN <= observed_fps <= _STREAM_FPS_MAX, (
+            f"camera {camera_id} baseline observed_fps={observed_fps:.2f} "
+            f"is outside expected range [{_STREAM_FPS_MIN:.1f}, {_STREAM_FPS_MAX:.1f}]"
+        )
+
+    objects_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-objects-snapshot",
+                "command_type": "get_table_env_objects_info",
+                "payload": {},
+            },
+        ),
+        "req-run-task-objects-snapshot",
+    )
+    task_objects = objects_payload["objects"]
+
+    run_task_code = textwrap.dedent(
+        """
+        def run(robot, objects):
+            red_cube = next(obj for obj in objects if obj["id"] == "red_cube")
+            blue_cube = next(obj for obj in objects if obj["id"] == "blue_cube")
+            target_center_z = (
+                blue_cube["pose"]["position_xyz_m"][2]
+                + (blue_cube["scale_xyz"][2] / 2)
+                + (red_cube["scale_xyz"][2] / 2)
+                + 0.03
+            )
+
+            robot.pick_and_place(
+                pick_position=red_cube["pose"]["position_xyz_m"],
+                place_position=[
+                    blue_cube["pose"]["position_xyz_m"][0],
+                    blue_cube["pose"]["position_xyz_m"][1],
+                    target_center_z,
+                ],
+                rotation=None,
+                grasp_offset=None,
+            )
+        """
+    ).strip() + "\n"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        run_task_future = executor.submit(
+            _send_request,
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-default-env",
+                "command_type": "run_task",
+                "payload": {
+                    "task": {
+                        "id": "task-run-task-stream-check",
+                        "objects": task_objects,
+                        "code": run_task_code,
+                    }
+                },
+            },
+            timeout_sec=_RUN_TASK_REQUEST_TIMEOUT_SEC,
+        )
+
+        during_task_metrics = _sample_streams_while_run_task_is_running(
+            top_stream_payload=top_stream_payload,
+            overview_stream_payload=overview_stream_payload,
+            output_dir=run_task_stream_dir,
+            run_task_future=run_task_future,
+        )
+        run_task_response = run_task_future.result(timeout=5.0)
+
+    run_task_payload = _assert_success(run_task_response, "req-run-task-default-env")
+    assert run_task_payload["task"]["id"] == "task-run-task-stream-check"
+    assert run_task_payload["task"]["status"] == "succeeded"
+    assert run_task_payload["task"]["result"] is None
+    assert isinstance(run_task_payload["task"]["started_at"], str) and run_task_payload["task"]["started_at"]
+    assert isinstance(run_task_payload["task"]["finished_at"], str) and run_task_payload["task"]["finished_at"]
+
+    hello_after_run_task_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-run-task",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-run-task",
+    )
+    assert hello_after_run_task_payload["robot"] == {"status": "idle", "current_task_id": None}
+    assert hello_after_run_task_payload["streams"]["active_count"] == 2
+    for metrics in during_task_metrics.values():
+        assert metrics["saved_sample_count"] >= 1
+
+    run_task_metrics_path = run_task_stream_dir / "run_task_stream_comparison.json"
+    run_task_metrics_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-run-task-stream-check",
+                "baseline_fps": baseline_fps,
+                "during_run_task": {
+                    camera_id: {
+                        "observed_fps_during_run_task": metrics["observed_fps_during_run_task"],
+                        "saved_sample_count": metrics["saved_sample_count"],
+                    }
+                    for camera_id, metrics in during_task_metrics.items()
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    assert run_task_metrics_path.exists()
+
+    stop_top_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-stop-stream-table-top",
+                "command_type": "stop_camera_stream",
+                "payload": {
+                    "stream": {
+                        "id": top_stream_payload["id"],
+                    }
+                },
+            },
+        ),
+        "req-run-task-stop-stream-table-top",
+    )
+    assert stop_top_stream_payload["stream"] == {"id": top_stream_payload["id"], "status": "stopped"}
+
+    stop_overview_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-run-task-stop-stream-table-overview",
+                "command_type": "stop_camera_stream",
+                "payload": {
+                    "stream": {
+                        "id": overview_stream_payload["id"],
+                    }
+                },
+            },
+        ),
+        "req-run-task-stop-stream-table-overview",
+    )
+    assert stop_overview_stream_payload["stream"] == {
+        "id": overview_stream_payload["id"],
+        "status": "stopped",
+    }
+
+    hello_after_stop_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-run-task-stream-stop",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-run-task-stream-stop",
+    )
+    assert hello_after_stop_payload["streams"]["active_count"] == 0

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from simworker.protocol import ControlRequest, ControlResponse
+from simworker.robots import get_robot_api_text
 from simworker.runtime import WorkerRuntime
 from simworker.table_environments import list_table_environment_ids
-
-_RECOGNIZED_UNIMPLEMENTED_COMMANDS = {
-    "run_task",
-}
 
 # 旧对象导入接口已经被 table_env 预设加载替代，继续调用时直接返回明确迁移提示。
 _REMOVED_COMMAND_MESSAGES = {
@@ -23,6 +20,7 @@ class CommandDispatcher:
         self._handlers = {
             "hello": self._handle_hello,
             "list_table_env": self._handle_list_table_env,
+            "list_api": self._handle_list_api,
             "list_camera": self._handle_list_camera,
             "load_table_env": self._handle_load_table_env,
             "get_table_env_objects_info": self._handle_get_table_env_objects_info,
@@ -30,6 +28,7 @@ class CommandDispatcher:
             "get_camera_info": self._handle_get_camera_info,
             "start_camera_stream": self._handle_start_camera_stream,
             "stop_camera_stream": self._handle_stop_camera_stream,
+            "run_task": self._handle_run_task,
             "shutdown": self._handle_shutdown,
         }
 
@@ -46,11 +45,6 @@ class CommandDispatcher:
                 return ControlResponse.error(
                     request_id=request.request_id,
                     error_message=removed_message,
-                )
-            if request.command_type in _RECOGNIZED_UNIMPLEMENTED_COMMANDS:
-                return ControlResponse.error(
-                    request_id=request.request_id,
-                    error_message=f"command_type {request.command_type} is not implemented yet",
                 )
             return ControlResponse.error(
                 request_id=request.request_id,
@@ -79,6 +73,14 @@ class CommandDispatcher:
             payload={
                 "table_envs": [{"id": table_env_id} for table_env_id in table_env_ids],
                 "table_env_count": len(table_env_ids),
+            },
+        )
+
+    def _handle_list_api(self, request: ControlRequest) -> ControlResponse:
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload={
+                "api": get_robot_api_text(),
             },
         )
 
@@ -156,6 +158,43 @@ class CommandDispatcher:
             payload=self._runtime.stop_camera_stream(stream_id),
         )
 
+    def _handle_run_task(self, request: ControlRequest) -> ControlResponse:
+        task_payload = request.payload.get("task")
+        if not isinstance(task_payload, dict):
+            return ControlResponse.error(
+                request_id=request.request_id,
+                error_message="payload.task must be an object",
+                payload={"task": {"id": None, "status": "failed", "result": None}},
+            )
+
+        task_id = task_payload.get("id") if isinstance(task_payload.get("id"), str) and task_payload.get("id") else None
+        try:
+            validated_task_id = _expect_non_empty_string(task_payload.get("id"), "payload.task.id")
+            task_code = _expect_non_empty_string(task_payload.get("code"), "payload.task.code")
+            task_objects = _expect_task_objects(task_payload.get("objects"))
+            payload = self._runtime.run_task(
+                task_id=validated_task_id,
+                task_code=task_code,
+                task_objects=task_objects,
+            )
+            return ControlResponse.success(
+                request_id=request.request_id,
+                payload=payload,
+            )
+        except ValueError as exc:
+            return ControlResponse.error(
+                request_id=request.request_id,
+                error_message=str(exc),
+                payload={"task": {"id": task_id, "status": "failed", "result": None}},
+            )
+        except Exception as exc:
+            self._runtime.logger.exception("run_task failed for task_id=%s", task_id)
+            return ControlResponse.error(
+                request_id=request.request_id,
+                error_message=f"Task failed: {_format_exception_message(exc)}",
+                payload={"task": {"id": task_id, "status": "failed", "result": None}},
+            )
+
     def _handle_shutdown(self, request: ControlRequest) -> ControlResponse:
         self._runtime.request_shutdown()
         return ControlResponse.success(
@@ -168,3 +207,19 @@ def _expect_non_empty_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field_name} must be a non-empty string")
     return value
+
+
+def _expect_task_objects(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError("payload.task.objects must be a list")
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"payload.task.objects[{index}] must be an object")
+    return value
+
+
+def _format_exception_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if message:
+        return message
+    return exc.__class__.__name__

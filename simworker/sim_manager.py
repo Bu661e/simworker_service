@@ -121,41 +121,53 @@ class SimManager:
     def ensure_started(self) -> "SimManager":
         return self.start()
 
-    def request(self, command_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _call_command(self, command_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        # API 层不需要感知控制协议 JSON；这里只暴露内部统一发送入口。
         with self._lock:
             return self._request(command_type, payload or {}, auto_start=True)
 
     def hello(self) -> dict[str, Any]:
-        return self.request("hello", {})
+        return self._call_command("hello", {})
 
     def list_table_env(self) -> dict[str, Any]:
-        return self.request("list_table_env", {})
+        return self._call_command("list_table_env", {})
+
+    def list_api(self) -> str:
+        payload = self._call_command("list_api", {})
+        api_text = payload.get("api")
+        if not isinstance(api_text, str) or not api_text:
+            raise SimManagerError(
+                "worker returned invalid list_api payload: payload.api must be a non-empty string",
+                command_type="list_api",
+                payload=payload,
+            )
+        return api_text
 
     def list_camera(self) -> dict[str, Any]:
-        return self.request("list_camera", {})
+        return self._call_command("list_camera", {})
 
     def load_table_env(self, table_env_id: str) -> dict[str, Any]:
         if not table_env_id:
             raise ValueError("table_env_id must be a non-empty string")
-        return self.request("load_table_env", {"table_env_id": table_env_id})
+        return self._call_command("load_table_env", {"table_env_id": table_env_id})
 
     def get_table_env_objects_info(self) -> dict[str, Any]:
-        return self.request("get_table_env_objects_info", {})
+        return self._call_command("get_table_env_objects_info", {})
 
     def get_robot_status(self) -> dict[str, Any]:
-        return self.request("get_robot_status", {})
+        return self._call_command("get_robot_status", {})
 
     def get_camera_info(self, camera_id: str) -> dict[str, Any]:
         if not camera_id:
             raise ValueError("camera_id must be a non-empty string")
-        return self.request("get_camera_info", {"camera": {"id": camera_id}})
+        return self._call_command("get_camera_info", {"camera": {"id": camera_id}})
 
     def start_camera_stream(self, camera_id: str, *, buffer_mode: str = "latest_frame") -> dict[str, Any]:
         if not camera_id:
             raise ValueError("camera_id must be a non-empty string")
         if not buffer_mode:
             raise ValueError("buffer_mode must be a non-empty string")
-        return self.request(
+        return self._call_command(
             "start_camera_stream",
             {
                 "camera": {"id": camera_id},
@@ -166,10 +178,28 @@ class SimManager:
     def stop_camera_stream(self, stream_id: str) -> dict[str, Any]:
         if not stream_id:
             raise ValueError("stream_id must be a non-empty string")
-        return self.request(
+        return self._call_command(
             "stop_camera_stream",
             {
                 "stream": {"id": stream_id},
+            },
+        )
+
+    def run_task(self, *, task_id: str, objects: list[dict[str, Any]], code: str) -> dict[str, Any]:
+        if not task_id:
+            raise ValueError("task_id must be a non-empty string")
+        if not isinstance(objects, list):
+            raise ValueError("objects must be a list")
+        if not code:
+            raise ValueError("code must be a non-empty string")
+        return self._call_command(
+            "run_task",
+            {
+                "task": {
+                    "id": task_id,
+                    "objects": objects,
+                    "code": code,
+                }
             },
         )
 
@@ -217,6 +247,16 @@ class SimManager:
                 sock.connect(str(self.control_socket_path))
                 send_json_message(sock, request_message)
                 response = recv_json_message(sock)
+        except TimeoutError as exc:
+            log_tail = self._tail_process_log_unlocked()
+            self._force_cleanup_process_unlocked()
+            raise SimManagerError(
+                "timed out waiting for worker response "
+                f"for command {command_type}; worker process was terminated.\n"
+                f"log_tail=\n{log_tail}",
+                request_id=request_id,
+                command_type=command_type,
+            ) from exc
         except OSError as exc:
             raise SimManagerError(
                 f"failed to send command {command_type} to worker socket {self.control_socket_path}: {exc}"
