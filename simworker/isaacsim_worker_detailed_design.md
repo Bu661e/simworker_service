@@ -2,6 +2,8 @@
 
 本文档描述新架构下 `IsaacSim Worker` 的设计。这里的 `worker` 指被 `SimManager` 拉起的 Isaac Sim 独立进程，负责仿真环境初始化、场景对象管理、相机采集、任务执行和原始视频帧生产。
 
+如果你是外部系统或 API 层使用者，建议先阅读 [sim_manager_introduction.md](./sim_manager_introduction.md)。那份文档面向外部集成，重点说明为什么 `SimManager` 是整个 `simworker` 包唯一应该被直接使用的入口。
+
 这里先强调一个当前实现中的硬约束：
 
 - 整个 simworker 在运行时只有一个 `Worker` 进程。

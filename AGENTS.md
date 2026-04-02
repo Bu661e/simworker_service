@@ -1,0 +1,7 @@
+API层设计文档是isaacsim_service_v0.md
+SimManager的API文档是simworker/sim_manager_introduction.md
+
+FastAPI相关环境都用uv实现
+
+测试用pytest
+
