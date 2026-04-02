@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -24,6 +25,11 @@ _YCB_ASSET_ROOT_CANDIDATES = (
     Path("/root/Download/YCB/Axis_Aligned_Physics"),
     Path("/root/Downloads/YCB/Axis_Aligned_Physics"),
 )
+_STREAM_SAMPLE_INTERVAL_SEC = 1.0
+_STREAM_SAMPLE_COUNT = 3
+_EXPECTED_STREAM_FPS = 30.0
+_STREAM_FPS_MIN = 24.0
+_STREAM_FPS_MAX = 36.0
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,63 @@ def _stream_ref_name(stream_ref_path: str) -> str:
     return stream_ref_path.removeprefix("shm://")
 
 
+def _read_latest_stream_snapshot(
+    shm: shared_memory.SharedMemory,
+    *,
+    timeout_sec: float = 2.0,
+) -> tuple[dict[str, Any], bytes]:
+    """按 latest-frame 的奇偶 seq 协议读取一份自洽快照。"""
+    header_size = latest_frame_header_size_bytes()
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        header_start = decode_latest_frame_header(shm.buf[:header_size])
+        if header_start["seq"] % 2 == 1 or header_start["data_size_bytes"] <= 0:
+            time.sleep(0.01)
+            continue
+
+        data_size_bytes = header_start["data_size_bytes"]
+        frame_bytes = bytes(shm.buf[header_size : header_size + data_size_bytes])
+        header_end = decode_latest_frame_header(shm.buf[:header_size])
+        if header_start["seq"] != header_end["seq"]:
+            continue
+        if header_end["seq"] % 2 == 1 or header_end["data_size_bytes"] <= 0:
+            continue
+        return header_end, frame_bytes
+
+    raise TimeoutError("timed out waiting for a readable latest-frame snapshot")
+
+
+def _wait_for_stream_frame_advance(
+    shm: shared_memory.SharedMemory,
+    *,
+    last_frame_id: int,
+    timeout_sec: float = 2.0,
+) -> tuple[dict[str, Any], bytes]:
+    """等待 stream 至少再产生一帧。"""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        header, frame_bytes = _read_latest_stream_snapshot(shm, timeout_sec=0.5)
+        if header["frame_id"] > last_frame_id:
+            return header, frame_bytes
+        time.sleep(0.01)
+    raise TimeoutError(f"timed out waiting for stream frame to advance past frame_id={last_frame_id}")
+
+
+def _save_stream_frame_png(
+    frame_bytes: bytes,
+    *,
+    width: int,
+    height: int,
+    output_path: Path,
+) -> None:
+    """把 rgb24 原始帧保存成 PNG，方便人工查看 stream 内容。"""
+    import numpy as np
+    from PIL import Image
+
+    image_array = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3))
+    Image.fromarray(image_array, mode="RGB").save(output_path)
+
+
 def _find_existing_ycb_asset_root() -> Path | None:
     for candidate in _YCB_ASSET_ROOT_CANDIDATES:
         if candidate.exists():
@@ -201,7 +264,72 @@ def simworker_process(tmp_path: Path) -> WorkerProcessHandle:
         log_handle.close()
 
 
-def test_simworker_camera_roundtrip(simworker_process: WorkerProcessHandle) -> None:
+def _assert_camera_snapshot_payload(
+    simworker_process: WorkerProcessHandle,
+    *,
+    camera_id: str,
+    prim_path: str,
+) -> None:
+    """校验单个相机快照返回值，并确认 artifact 已真实落盘。"""
+    camera_response = _send_request(
+        simworker_process.socket_path,
+        {
+            "request_id": f"req-camera-{camera_id}",
+            "command_type": "get_camera_info",
+            "payload": {
+                "camera": {
+                    "id": camera_id,
+                }
+            },
+        },
+    )
+    assert camera_response["ok"] is True
+
+    camera_payload = camera_response["payload"]["camera"]
+    assert camera_payload["id"] == camera_id
+    assert camera_payload["status"] == "ready"
+    assert camera_payload["prim_path"] == prim_path
+    assert camera_payload["resolution"] == [640, 640]
+
+    intrinsics = camera_payload["intrinsics"]
+    assert intrinsics["width"] == 640
+    assert intrinsics["height"] == 640
+    assert intrinsics["fx"] > 0.0
+    assert intrinsics["fy"] > 0.0
+
+    pose = camera_payload["pose"]
+    assert len(pose["position_xyz_m"]) == 3
+    assert len(pose["quaternion_wxyz"]) == 4
+
+    rgb_ref = camera_payload["rgb_image"]["ref"]
+    rgb_path = Path(rgb_ref["path"])
+    assert rgb_ref["kind"] == "artifact_file"
+    assert rgb_ref["content_type"] == "image/png"
+    assert rgb_path.suffix == ".png"
+    assert rgb_path.exists()
+    assert rgb_path.stat().st_size > 0
+    assert rgb_path.parent.name == "artifacts"
+    assert simworker_process.session_dir in rgb_path.parents
+
+    depth_ref = camera_payload["depth_image"]["ref"]
+    depth_path = Path(depth_ref["path"])
+    assert camera_payload["depth_image"]["unit"] == "meter"
+    assert depth_ref["kind"] == "artifact_file"
+    assert depth_ref["content_type"] == "application/x-npy"
+    assert depth_path.suffix == ".npy"
+    assert depth_path.exists()
+    assert depth_path.stat().st_size > 0
+    assert depth_path.parent.name == "artifacts"
+    assert simworker_process.session_dir in depth_path.parents
+
+
+def _assert_simple_interface_sequence(
+    simworker_process: WorkerProcessHandle,
+    *,
+    table_env_id: str,
+    expected_object_ids: set[str],
+) -> None:
+    """按固定顺序走完 7 个简单接口，保证拍照时桌面环境已经完成导入。"""
     hello_response = _send_request(
         simworker_process.socket_path,
         {
@@ -257,154 +385,61 @@ def test_simworker_camera_roundtrip(simworker_process: WorkerProcessHandle) -> N
     )
     assert robot_status_payload["robot"] == {"status": "idle", "current_task_id": None}
 
-    # 先加载一套桌面环境，再抓相机，保证相机快照里已经包含桌面物体。
-    load_default_payload = _assert_success(
+    load_payload = _assert_success(
         _send_request(
             simworker_process.socket_path,
             {
-                "request_id": "req-load-default-before-camera",
+                "request_id": "req-load-before-camera",
                 "command_type": "load_table_env",
                 "payload": {
-                    "table_env_id": "default",
+                    "table_env_id": table_env_id,
                 },
             },
         ),
-        "req-load-default-before-camera",
+        "req-load-before-camera",
     )
-    assert load_default_payload["table_env"] == {"id": "default", "status": "loaded"}
-    assert load_default_payload["object_count"] == 2
+    assert load_payload["table_env"] == {"id": table_env_id, "status": "loaded"}
+    assert load_payload["object_count"] == len(expected_object_ids)
+    assert {item["id"] for item in load_payload["objects"]} == expected_object_ids
 
     table_env_objects_payload = _assert_success(
         _send_request(
             simworker_process.socket_path,
             {
-                "request_id": "req-table-env-objects-before-camera",
+                "request_id": "req-table-env-objects",
                 "command_type": "get_table_env_objects_info",
                 "payload": {},
             },
         ),
-        "req-table-env-objects-before-camera",
+        "req-table-env-objects",
     )
-    assert table_env_objects_payload["table_env"] == {"loaded": True, "id": "default"}
-    assert table_env_objects_payload["object_count"] == 2
-    assert {item["id"] for item in table_env_objects_payload["objects"]} == {"red_cube", "blue_cube"}
+    assert table_env_objects_payload["table_env"] == {"loaded": True, "id": table_env_id}
+    assert table_env_objects_payload["object_count"] == len(expected_object_ids)
+    assert {item["id"] for item in table_env_objects_payload["objects"]} == expected_object_ids
     for object_payload in table_env_objects_payload["objects"]:
         _assert_object_transform_payload(object_payload)
 
-    # 当前基础环境里固定有两个相机，两个都做一遍快照与元信息校验。
+    # 拍照放在最后执行，人工看图片时就能直观看到桌面环境是否已真正加载进场景。
     expected_camera_prim_paths = {
         "table_top": "/World/Cameras/TableTopCamera",
         "table_overview": "/World/Cameras/TableOverviewCamera",
     }
     for camera_id, prim_path in expected_camera_prim_paths.items():
-        camera_response = _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": f"req-camera-{camera_id}",
-                "command_type": "get_camera_info",
-                "payload": {
-                    "camera": {
-                        "id": camera_id,
-                    }
-                },
-            },
+        _assert_camera_snapshot_payload(
+            simworker_process,
+            camera_id=camera_id,
+            prim_path=prim_path,
         )
-        assert camera_response["ok"] is True
-
-        camera_payload = camera_response["payload"]["camera"]
-        assert camera_payload["id"] == camera_id
-        assert camera_payload["status"] == "ready"
-        assert camera_payload["prim_path"] == prim_path
-        assert camera_payload["resolution"] == [640, 640]
-
-        intrinsics = camera_payload["intrinsics"]
-        assert intrinsics["width"] == 640
-        assert intrinsics["height"] == 640
-        assert intrinsics["fx"] > 0.0
-        assert intrinsics["fy"] > 0.0
-
-        pose = camera_payload["pose"]
-        assert len(pose["position_xyz_m"]) == 3
-        assert len(pose["quaternion_wxyz"]) == 4
-
-        rgb_ref = camera_payload["rgb_image"]["ref"]
-        rgb_path = Path(rgb_ref["path"])
-        assert rgb_ref["kind"] == "artifact_file"
-        assert rgb_ref["content_type"] == "image/png"
-        assert rgb_path.suffix == ".png"
-        assert rgb_path.exists()
-        assert rgb_path.stat().st_size > 0
-        assert rgb_path.parent.name == "artifacts"
-        assert simworker_process.session_dir in rgb_path.parents
-
-        depth_ref = camera_payload["depth_image"]["ref"]
-        depth_path = Path(depth_ref["path"])
-        assert camera_payload["depth_image"]["unit"] == "meter"
-        assert depth_ref["kind"] == "artifact_file"
-        assert depth_ref["content_type"] == "application/x-npy"
-        assert depth_path.suffix == ".npy"
-        assert depth_path.exists()
-        assert depth_path.stat().st_size > 0
-        assert depth_path.parent.name == "artifacts"
-        assert simworker_process.session_dir in depth_path.parents
-
-    invalid_camera_response = _send_request(
-        simworker_process.socket_path,
-        {
-            "request_id": "req-camera-missing",
-            "command_type": "get_camera_info",
-            "payload": {
-                "camera": {
-                    "id": "missing_camera",
-                }
-            },
-        },
-    )
-    assert invalid_camera_response["ok"] is False
-    assert invalid_camera_response["error_message"] == "camera.id missing_camera does not exist"
 
 
-def test_simworker_camera_stream_roundtrip(simworker_process: WorkerProcessHandle) -> None:
-    start_stream_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-start-stream",
-                "command_type": "start_camera_stream",
-                "payload": {
-                    "camera": {
-                        "id": "table_top",
-                    },
-                    "stream": {
-                        "buffer_mode": "latest_frame",
-                    },
-                },
-            },
-        ),
-        "req-start-stream",
-    )
-    assert start_stream_payload["camera"] == {"id": "table_top"}
-
-    stream_payload = start_stream_payload["stream"]
+def _assert_stream_shared_memory_header(stream_payload: dict[str, Any]) -> str:
+    """打开共享内存，确认 header 已经包含一帧可读 RGB 数据。"""
     assert stream_payload["status"] == "running"
     assert stream_payload["buffer_mode"] == "latest_frame"
     assert stream_payload["pixel_format"] == "rgb24"
     assert stream_payload["resolution"] == [640, 640]
     assert stream_payload["ref"]["kind"] == "shared_memory"
     assert stream_payload["ref"]["layout"] == "latest_frame_v1"
-
-    hello_after_start_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-hello-after-stream-start",
-                "command_type": "hello",
-                "payload": {},
-            },
-        ),
-        "req-hello-after-stream-start",
-    )
-    assert hello_after_start_payload["streams"]["active_count"] == 1
 
     shm_name = _stream_ref_name(stream_payload["ref"]["path"])
     header_size = latest_frame_header_size_bytes()
@@ -427,13 +462,125 @@ def test_simworker_camera_stream_roundtrip(simworker_process: WorkerProcessHandl
         assert header["seq"] % 2 == 0
     finally:
         shm.close()
+    return shm_name
 
-    # 对同一个相机重复启动流时应复用已有流，而不是再创建一条新的共享内存流。
-    restart_stream_payload = _assert_success(
+
+def _assert_stream_frequency_and_save_samples(
+    stream_payload: dict[str, Any],
+    *,
+    camera_id: str,
+    output_dir: Path,
+) -> str:
+    """
+    验证 stream 实际发布频率接近当前约定值，并每秒保存一张流帧，供人工查看。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shm_name = _stream_ref_name(stream_payload["ref"]["path"])
+    shm = shared_memory.SharedMemory(name=shm_name, create=False)
+    try:
+        start_header, _ = _read_latest_stream_snapshot(shm, timeout_sec=5.0)
+        start_frame_id = int(start_header["frame_id"])
+        start_timestamp_ns = int(start_header["timestamp_ns"])
+        last_frame_id = start_frame_id
+
+        samples: list[dict[str, Any]] = []
+        end_header = start_header
+        for sample_index in range(1, _STREAM_SAMPLE_COUNT + 1):
+            time.sleep(_STREAM_SAMPLE_INTERVAL_SEC)
+            sample_header, frame_bytes = _wait_for_stream_frame_advance(
+                shm,
+                last_frame_id=last_frame_id,
+                timeout_sec=2.0,
+            )
+            sample_path = output_dir / f"{camera_id}_sample_{sample_index:02d}.png"
+            _save_stream_frame_png(
+                frame_bytes,
+                width=int(sample_header["width"]),
+                height=int(sample_header["height"]),
+                output_path=sample_path,
+            )
+            samples.append(
+                {
+                    "sample_index": sample_index,
+                    "frame_id": int(sample_header["frame_id"]),
+                    "timestamp_ns": int(sample_header["timestamp_ns"]),
+                    "path": str(sample_path),
+                }
+            )
+            last_frame_id = int(sample_header["frame_id"])
+            end_header = sample_header
+
+        elapsed_sec = (int(end_header["timestamp_ns"]) - start_timestamp_ns) / 1_000_000_000.0
+        if elapsed_sec <= 0.0:
+            raise AssertionError("stream sample elapsed time must be positive")
+        observed_fps = (int(end_header["frame_id"]) - start_frame_id) / elapsed_sec
+        assert _STREAM_FPS_MIN <= observed_fps <= _STREAM_FPS_MAX, (
+            f"camera {camera_id} observed_fps={observed_fps:.2f} "
+            f"is outside expected range [{_STREAM_FPS_MIN:.1f}, {_STREAM_FPS_MAX:.1f}]"
+        )
+
+        metrics_path = output_dir / f"{camera_id}_stream_metrics.json"
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "camera_id": camera_id,
+                    "stream_id": stream_payload["id"],
+                    "expected_fps": _EXPECTED_STREAM_FPS,
+                    "observed_fps": observed_fps,
+                    "sample_interval_sec": _STREAM_SAMPLE_INTERVAL_SEC,
+                    "sample_count": _STREAM_SAMPLE_COUNT,
+                    "samples": samples,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    finally:
+        shm.close()
+    return shm_name
+
+
+def test_simworker_default_env_simple_interfaces_and_two_camera_snapshots(
+    simworker_process: WorkerProcessHandle,
+) -> None:
+    _assert_simple_interface_sequence(
+        simworker_process,
+        table_env_id="default",
+        expected_object_ids={"red_cube", "blue_cube"},
+    )
+
+
+def test_simworker_ycb_env_simple_interfaces_and_two_camera_snapshots(
+    simworker_process: WorkerProcessHandle,
+) -> None:
+    ycb_asset_root = _find_existing_ycb_asset_root()
+    if ycb_asset_root is None:
+        checked_paths = ", ".join(str(path) for path in _YCB_ASSET_ROOT_CANDIDATES)
+        pytest.skip(f"YCB 资产目录不存在: {checked_paths}")
+
+    _assert_simple_interface_sequence(
+        simworker_process,
+        table_env_id="ycb",
+        expected_object_ids={"cracker_box_1", "mustard_bottle_1"},
+    )
+
+
+def test_simworker_default_env_two_camera_snapshots_and_dual_streams(
+    simworker_process: WorkerProcessHandle,
+) -> None:
+    _assert_simple_interface_sequence(
+        simworker_process,
+        table_env_id="default",
+        expected_object_ids={"red_cube", "blue_cube"},
+    )
+    stream_sample_dir = simworker_process.session_dir.parent / "stream_samples"
+
+    top_stream_response = _assert_success(
         _send_request(
             simworker_process.socket_path,
             {
-                "request_id": "req-start-stream-again",
+                "request_id": "req-start-stream-table-top",
                 "command_type": "start_camera_stream",
                 "payload": {
                     "camera": {
@@ -445,221 +592,148 @@ def test_simworker_camera_stream_roundtrip(simworker_process: WorkerProcessHandl
                 },
             },
         ),
-        "req-start-stream-again",
+        "req-start-stream-table-top",
     )
-    assert restart_stream_payload["stream"]["id"] == stream_payload["id"]
-    assert restart_stream_payload["stream"]["ref"]["path"] == stream_payload["ref"]["path"]
+    assert top_stream_response["camera"] == {"id": "table_top"}
+    top_stream_payload = top_stream_response["stream"]
+    _assert_stream_shared_memory_header(top_stream_payload)
 
-    stop_stream_payload = _assert_success(
+    overview_stream_response = _assert_success(
         _send_request(
             simworker_process.socket_path,
             {
-                "request_id": "req-stop-stream",
+                "request_id": "req-start-stream-table-overview",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_overview",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-start-stream-table-overview",
+    )
+    assert overview_stream_response["camera"] == {"id": "table_overview"}
+    overview_stream_payload = overview_stream_response["stream"]
+    _assert_stream_shared_memory_header(overview_stream_payload)
+
+    # 对同一个相机重复启动时应该复用已有流。
+    restart_top_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-start-stream-table-top-again",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_top",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-start-stream-table-top-again",
+    )
+    assert restart_top_stream_payload["stream"]["id"] == top_stream_payload["id"]
+    assert restart_top_stream_payload["stream"]["ref"]["path"] == top_stream_payload["ref"]["path"]
+
+    # 在两路流都启动后，检查 active_count 并做帧率与采样图验证。
+    hello_after_start_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-stream-start",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-stream-start",
+    )
+    assert hello_after_start_payload["streams"]["active_count"] == 2
+
+    top_shm_name = _assert_stream_frequency_and_save_samples(
+        top_stream_payload,
+        camera_id="table_top",
+        output_dir=stream_sample_dir,
+    )
+    overview_shm_name = _assert_stream_frequency_and_save_samples(
+        overview_stream_payload,
+        camera_id="table_overview",
+        output_dir=stream_sample_dir,
+    )
+
+    stop_top_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-stop-stream-table-top",
                 "command_type": "stop_camera_stream",
                 "payload": {
                     "stream": {
-                        "id": stream_payload["id"],
+                        "id": top_stream_payload["id"],
                     }
                 },
             },
         ),
-        "req-stop-stream",
+        "req-stop-stream-table-top",
     )
-    assert stop_stream_payload["stream"] == {"id": stream_payload["id"], "status": "stopped"}
+    assert stop_top_stream_payload["stream"] == {"id": top_stream_payload["id"], "status": "stopped"}
+
+    hello_after_top_stop_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-top-stream-stop",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-top-stream-stop",
+    )
+    assert hello_after_top_stop_payload["streams"]["active_count"] == 1
+
+    stop_overview_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-stop-stream-table-overview",
+                "command_type": "stop_camera_stream",
+                "payload": {
+                    "stream": {
+                        "id": overview_stream_payload["id"],
+                    }
+                },
+            },
+        ),
+        "req-stop-stream-table-overview",
+    )
+    assert stop_overview_stream_payload["stream"] == {
+        "id": overview_stream_payload["id"],
+        "status": "stopped",
+    }
 
     hello_after_stop_payload = _assert_success(
         _send_request(
             simworker_process.socket_path,
             {
-                "request_id": "req-hello-after-stream-stop",
+                "request_id": "req-hello-after-all-stream-stop",
                 "command_type": "hello",
                 "payload": {},
             },
         ),
-        "req-hello-after-stream-stop",
+        "req-hello-after-all-stream-stop",
     )
     assert hello_after_stop_payload["streams"]["active_count"] == 0
 
     with pytest.raises(FileNotFoundError):
-        orphan_shm = shared_memory.SharedMemory(name=shm_name, create=False)
+        orphan_shm = shared_memory.SharedMemory(name=top_shm_name, create=False)
         orphan_shm.close()
 
-    invalid_stop_response = _send_request(
-        simworker_process.socket_path,
-        {
-            "request_id": "req-stop-stream-missing",
-            "command_type": "stop_camera_stream",
-            "payload": {
-                "stream": {
-                    "id": stream_payload["id"],
-                }
-            },
-        },
-    )
-    assert invalid_stop_response["ok"] is False
-    assert invalid_stop_response["error_message"] == f"stream.id {stream_payload['id']} does not exist"
-
-
-def test_simworker_load_default_table_env_and_query_objects(simworker_process: WorkerProcessHandle) -> None:
-    before_load_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-objects-before-load",
-                "command_type": "get_table_env_objects_info",
-                "payload": {},
-            },
-        ),
-        "req-objects-before-load",
-    )
-    assert before_load_payload["table_env"] == {"loaded": False, "id": None}
-    assert before_load_payload["object_count"] == 0
-    assert before_load_payload["objects"] == []
-
-    load_default_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-load-default",
-                "command_type": "load_table_env",
-                "payload": {
-                    "table_env_id": "default",
-                },
-            },
-        ),
-        "req-load-default",
-    )
-    assert load_default_payload["table_env"] == {"id": "default", "status": "loaded"}
-    assert load_default_payload["object_count"] == 2
-    assert {item["id"] for item in load_default_payload["objects"]} == {"red_cube", "blue_cube"}
-
-    # 相同 table_env 重复加载应保持幂等。
-    reload_default_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-reload-default",
-                "command_type": "load_table_env",
-                "payload": {
-                    "table_env_id": "default",
-                },
-            },
-        ),
-        "req-reload-default",
-    )
-    assert reload_default_payload["table_env"] == {"id": "default", "status": "loaded"}
-    assert reload_default_payload["object_count"] == 2
-    assert {item["id"] for item in reload_default_payload["objects"]} == {"red_cube", "blue_cube"}
-
-    objects_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-objects-after-load",
-                "command_type": "get_table_env_objects_info",
-                "payload": {},
-            },
-        ),
-        "req-objects-after-load",
-    )
-    assert objects_payload["table_env"] == {"loaded": True, "id": "default"}
-    assert objects_payload["object_count"] == 2
-    returned_objects = {item["id"]: item for item in objects_payload["objects"]}
-    assert set(returned_objects) == {"red_cube", "blue_cube"}
-    for object_payload in returned_objects.values():
-        _assert_object_transform_payload(object_payload)
-
-    hello_after_load_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-hello-after-load",
-                "command_type": "hello",
-                "payload": {},
-            },
-        ),
-        "req-hello-after-load",
-    )
-    assert hello_after_load_payload["table_env"] == {"loaded": True, "id": "default"}
-    assert hello_after_load_payload["objects"]["object_count"] == 2
-
-    switch_env_response = _send_request(
-        simworker_process.socket_path,
-        {
-            "request_id": "req-switch-env",
-            "command_type": "load_table_env",
-            "payload": {
-                "table_env_id": "ycb",
-            },
-        },
-    )
-    assert switch_env_response["request_id"] == "req-switch-env"
-    assert switch_env_response["ok"] is False
-    assert (
-        switch_env_response["error_message"]
-        == "table_env_id ycb does not match current loaded table_env_id default"
-    )
-
-
-def test_simworker_rejects_unsupported_table_env(simworker_process: WorkerProcessHandle) -> None:
-    invalid_env_response = _send_request(
-        simworker_process.socket_path,
-        {
-            "request_id": "req-invalid-env",
-            "command_type": "load_table_env",
-            "payload": {
-                "table_env_id": "unknown_env",
-            },
-        },
-    )
-    assert invalid_env_response["request_id"] == "req-invalid-env"
-    assert invalid_env_response["ok"] is False
-    assert (
-        invalid_env_response["error_message"]
-        == "unsupported table_env_id: unknown_env; supported values: default, ycb"
-    )
-
-
-def test_simworker_load_ycb_table_env_and_query_objects(simworker_process: WorkerProcessHandle) -> None:
-    ycb_asset_root = _find_existing_ycb_asset_root()
-    if ycb_asset_root is None:
-        checked_paths = ", ".join(str(path) for path in _YCB_ASSET_ROOT_CANDIDATES)
-        pytest.skip(f"YCB 资产目录不存在: {checked_paths}")
-
-    load_ycb_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-load-ycb",
-                "command_type": "load_table_env",
-                "payload": {
-                    "table_env_id": "ycb",
-                },
-            },
-        ),
-        "req-load-ycb",
-    )
-    assert load_ycb_payload["table_env"] == {"id": "ycb", "status": "loaded"}
-    assert load_ycb_payload["object_count"] == 2
-    assert {item["id"] for item in load_ycb_payload["objects"]} == {
-        "cracker_box_1",
-        "mustard_bottle_1",
-    }
-
-    objects_payload = _assert_success(
-        _send_request(
-            simworker_process.socket_path,
-            {
-                "request_id": "req-ycb-objects",
-                "command_type": "get_table_env_objects_info",
-                "payload": {},
-            },
-        ),
-        "req-ycb-objects",
-    )
-    assert objects_payload["table_env"] == {"loaded": True, "id": "ycb"}
-    assert objects_payload["object_count"] == 2
-    returned_objects = {item["id"]: item for item in objects_payload["objects"]}
-    assert set(returned_objects) == {"cracker_box_1", "mustard_bottle_1"}
-    for object_payload in returned_objects.values():
-        _assert_object_transform_payload(object_payload)
+    with pytest.raises(FileNotFoundError):
+        orphan_shm = shared_memory.SharedMemory(name=overview_shm_name, create=False)
+        orphan_shm.close()

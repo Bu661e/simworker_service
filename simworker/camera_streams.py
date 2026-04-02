@@ -66,12 +66,16 @@ class CameraStreamRuntimeState:
     def write_rgb_frame(self, rgba_image: Any) -> None:
         import numpy as np
 
-        width = int(rgba_image.shape[1])
-        height = int(rgba_image.shape[0])
-        rgb_image = rgba_image[:, :, :3] if int(rgba_image.shape[2]) == 4 else rgba_image
-        rgb_image = np.ascontiguousarray(rgb_image, dtype=np.uint8)
-        frame_bytes = rgb_image.tobytes(order="C")
-        data_size_bytes = len(frame_bytes)
+        rgba_array = np.asarray(rgba_image)
+        width = int(rgba_array.shape[1])
+        height = int(rgba_array.shape[0])
+        rgb_image = rgba_array[:, :, :3] if int(rgba_array.shape[2]) == 4 else rgba_array
+        if rgb_image.dtype != np.uint8:
+            rgb_image = rgb_image.astype(np.uint8, copy=False)
+        if not rgb_image.flags.c_contiguous:
+            rgb_image = np.ascontiguousarray(rgb_image)
+        frame_view = memoryview(rgb_image).cast("B")
+        data_size_bytes = frame_view.nbytes
         if data_size_bytes > self.frame_capacity_bytes:
             raise ValueError(
                 f"stream frame size {data_size_bytes} exceeds capacity {self.frame_capacity_bytes}"
@@ -92,7 +96,7 @@ class CameraStreamRuntimeState:
             timestamp_ns=timestamp_ns,
             frame_id=frame_id,
         )
-        self.buffer[_HEADER_SIZE : _HEADER_SIZE + data_size_bytes] = frame_bytes
+        self.buffer[_HEADER_SIZE : _HEADER_SIZE + data_size_bytes] = frame_view
         publish_seq = write_seq + 1
         self._write_header(
             seq=publish_seq,

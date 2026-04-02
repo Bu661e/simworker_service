@@ -13,7 +13,7 @@ from simworker.camera_streams import CameraStreamRuntimeState, create_camera_str
 from simworker.table_environments import ensure_supported_table_environment_id, load_table_environment
 
 _CAMERA_CAPTURE_RENDER_STEPS = 2
-_STREAM_LOOP_RENDER_PERIOD_SEC = 0.10
+_STREAM_LOOP_RENDER_PERIOD_SEC = 1.0 / 30.0
 _STREAM_LOOP_IDLE_WAIT_SEC = 0.50
 
 
@@ -365,9 +365,8 @@ class WorkerRuntime:
                 self.world.step(render=True)
 
     def _capture_camera_rgba(self, camera: object) -> Any:
-        import numpy as np
-
-        return np.asarray(camera.get_rgba(), dtype=np.uint8)
+        # 这里尽量直接复用 Isaac Sim 返回的数组，减少流热路径上的额外拷贝。
+        return camera.get_rgba()
 
     def _allocate_stream_ids(self, camera_id: str) -> tuple[str, str]:
         next_index = self.stream_counters.get(camera_id, 0) + 1

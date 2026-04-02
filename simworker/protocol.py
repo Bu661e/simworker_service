@@ -158,7 +158,7 @@ class UnixSocketControlServer:
         handle_request: Callable[[ControlRequest], ControlResponse],
         should_stop: Callable[[], bool],
         idle_callback: Callable[[], None] | None = None,
-        poll_interval_sec: float = 0.05,
+        poll_interval_sec: float = 0.001,
     ) -> None:
         if self._server_socket is None:
             raise RuntimeError("server socket is not started")
