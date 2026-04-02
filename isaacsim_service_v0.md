@@ -42,20 +42,26 @@
 
 - API 层内部只维护一个长期存活的 `SimManager`
 - API 服务启动时，推荐显式调用一次 `SimManager.ensure_started()`
-- 除视频流接口外，其余接口尽量直接映射 `SimManager`，不在 API 层重复发明一套状态机和协议
+- 除“单帧采集 zip 接口”和“视频流接口”外，其余接口尽量直接映射 `SimManager`，不在 API 层重复发明一套状态机和协议
 - 除 `GET /cameras/{camera_id}/stream` 外，其余接口都采用同步请求-响应模式
 - `run_task` 也是同步接口：HTTP 请求会阻塞到任务执行完成或失败返回
-- 除视频流成功响应外，其余接口响应体统一使用 JSON
+- 除下面两个成功响应例外外，其余接口响应体统一使用 JSON：
+  - `POST /cameras/{camera_id}/capture` 成功时返回 `zip`
+  - `GET /cameras/{camera_id}/stream` 成功时返回视频流本体
 - API 层所有接口统一返回 HTTP `200 OK`
 - JSON 响应统一约定：
   - 成功时：`ok=true`，并带上业务字段
   - 失败时：`ok=false`，并用 `error_message` 表达错误原因
 - API 层尽量直接沿用对应 `SimManager` 方法返回的 payload，只在最外层补 `ok`
-- 视频流接口是唯一的例外：
-  - API 层需要自己处理共享内存读帧、编码和对外发布
-  - 但底层相机流的创建与销毁仍然通过 `SimManager.start_camera_stream()` / `SimManager.stop_camera_stream()` 完成
-  - 视频流成功响应是视频流本体，不再额外包 `ok`
-  - 如果流启动失败，则返回 HTTP `200 OK` 的 JSON 错误响应：`{"ok": false, "error_message": "..."}`
+- 这两个例外接口的处理原则如下：
+  - 单帧采集接口：
+    - API 层先调用 `SimManager.get_camera_info(camera_id)`
+    - 再把返回中的 RGB / Depth 产物与元数据打成一个 zip 返回
+  - 视频流接口：
+    - API 层需要自己处理共享内存读帧、编码和对外发布
+    - 底层相机流的创建与销毁仍然通过 `SimManager.start_camera_stream()` / `SimManager.stop_camera_stream()` 完成
+    - 视频流成功响应是视频流本体，不再额外包 `ok`
+    - 如果流启动失败，则返回 HTTP `200 OK` 的 JSON 错误响应：`{"ok": false, "error_message": "..."}`
 
 ### 1. 健康检查
 
@@ -154,29 +160,45 @@
 }
 ```
 
-### 3. 采集单帧相机信息与 RGB / Depth 产物
+### 3. 采集单帧 RGBD 打包结果
 
 `POST /cameras/{camera_id}/capture`
 
-接口名称：采集单帧相机信息与 RGB / Depth 产物
+接口名称：采集单帧 RGBD 打包结果
 
 接口作用：
 
 - 触发指定摄像头采集一帧 RGB 和 Depth
-- 返回本次采集对应的相机元数据
-- 返回 RGB / Depth 产物引用
-- 该接口直接映射 `SimManager.get_camera_info(camera_id)`
+- 将 RGB 编码为 `png`
+- 将 Depth 保存为 `npy`，保留原始浮点深度值
+- 将本次结果直接打包成一个 `zip` 二进制响应返回给客户端
+- 客户端拿到这个打包结果后，可以直接转发给另外一个服务器，或者本地解包使用
+- 该接口是 API 层的一个特例：它会先调用 `SimManager.get_camera_info(camera_id)`，再把结果重新打包
 
 成功响应：
 
 - HTTP `200 OK`
-- `Content-Type: application/json`
+- `Content-Type: application/zip`
 
-响应体示例：
+响应体说明：
+
+- 响应体本身就是一个 zip 文件，不是 JSON
+- 建议响应头包含：
+  - `Content-Disposition: attachment; filename="table_top_20260403_120000.zip"`
+
+zip 包内文件约定：
+
+- `rgb.png`
+- `depth.npy`
+- `camera_info.json`
+
+`camera_info.json` 约定：
+
+- 优先直接复用 `SimManager.get_camera_info(camera_id)` 的成功 payload
+- 也就是说，它的结构尽量保持为：
 
 ```json
 {
-  "ok": true,
   "camera": {
     "id": "table_top",
     "status": "ready",
@@ -216,11 +238,11 @@
 }
 ```
 
-字段说明：
+说明：
 
-- `pose.position_xyz_m` / `pose.quaternion_wxyz` 都是 world 坐标系下的数据
-- `rgb_image.ref.path` / `depth_image.ref.path` 当前是服务器本地产物路径
-- 如果后续前端确实需要直接下载这些文件，可以在 API 层再增加下载映射；V0 先不额外包装成 zip
+- `camera_info.json` 中当前允许保留 `SimManager` 原始返回里的本地 artifact 路径
+- 调用方真正需要直接使用的文件仍然是 zip 中的 `rgb.png` 和 `depth.npy`
+- 这样可以最大程度复用 `SimManager` 已有 JSON 结构，减少 API 层重新组织字段的成本
 
 失败响应体示例：
 
@@ -707,7 +729,7 @@ PUT /table-env/current/default
 6. 客户端调用 `GET /robot/api`，获取当前可用机械臂动作 API 文本。
 7. 客户端调用 `PUT /table-env/current/{table_env_id}`，加载目标桌面环境。
 8. 客户端调用 `GET /table-env/current/objects`，获取当前桌面环境中的所有物体信息。
-9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取相机元数据与 RGB / Depth 产物引用。
+9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取一个包含 `rgb.png`、`depth.npy`、`camera_info.json` 的 zip 包。
 10. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动 / 复用 / 回收底层 simworker stream。
 11. 客户端结合：
     - `GET /table-env/current/objects`

@@ -1,6 +1,7 @@
 # Python 缓存与编译产物
 __pycache__/
 *.py[cod]
+.venv/
 
 # 测试与类型检查缓存
 .pytest_cache/
