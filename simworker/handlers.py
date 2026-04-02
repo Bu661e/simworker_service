@@ -5,8 +5,6 @@ from simworker.runtime import WorkerRuntime
 from simworker.table_environments import list_table_environment_ids
 
 _RECOGNIZED_UNIMPLEMENTED_COMMANDS = {
-    "start_camera_stream",
-    "stop_camera_stream",
     "run_task",
 }
 
@@ -30,6 +28,8 @@ class CommandDispatcher:
             "get_table_env_objects_info": self._handle_get_table_env_objects_info,
             "get_robot_status": self._handle_get_robot_status,
             "get_camera_info": self._handle_get_camera_info,
+            "start_camera_stream": self._handle_start_camera_stream,
+            "stop_camera_stream": self._handle_stop_camera_stream,
             "shutdown": self._handle_shutdown,
         }
 
@@ -124,6 +124,36 @@ class CommandDispatcher:
         return ControlResponse.success(
             request_id=request.request_id,
             payload=self._runtime.build_camera_info_payload(camera_id),
+        )
+
+    def _handle_start_camera_stream(self, request: ControlRequest) -> ControlResponse:
+        camera_payload = request.payload.get("camera")
+        if not isinstance(camera_payload, dict):
+            raise ValueError("payload.camera must be an object")
+
+        stream_payload = request.payload.get("stream", {})
+        if not isinstance(stream_payload, dict):
+            raise ValueError("payload.stream must be an object")
+
+        camera_id = _expect_non_empty_string(camera_payload.get("id"), "payload.camera.id")
+        buffer_mode = stream_payload.get("buffer_mode", "latest_frame")
+        if not isinstance(buffer_mode, str) or not buffer_mode:
+            raise ValueError("payload.stream.buffer_mode must be a non-empty string")
+
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload=self._runtime.start_camera_stream(camera_id, buffer_mode=buffer_mode),
+        )
+
+    def _handle_stop_camera_stream(self, request: ControlRequest) -> ControlResponse:
+        stream_payload = request.payload.get("stream")
+        if not isinstance(stream_payload, dict):
+            raise ValueError("payload.stream must be an object")
+
+        stream_id = _expect_non_empty_string(stream_payload.get("id"), "payload.stream.id")
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload=self._runtime.stop_camera_stream(stream_id),
         )
 
     def _handle_shutdown(self, request: ControlRequest) -> ControlResponse:

@@ -2,6 +2,13 @@
 
 本文档描述新架构下 `IsaacSim Worker` 的设计。这里的 `worker` 指被 `SimManager` 拉起的 Isaac Sim 独立进程，负责仿真环境初始化、场景对象管理、相机采集、任务执行和原始视频帧生产。
 
+这里先强调一个当前实现中的硬约束：
+
+- 整个 simworker 在运行时只有一个 `Worker` 进程。
+- 这个 `Worker` 进程就是唯一的 Isaac Sim 执行进程。
+- 不再额外拆出第二个 `Worker` 进程去负责 stream、渲染或 world step。
+- `SimManager` 只负责拉起和管理这一唯一的 `Worker` 进程。
+
 当前设计目标有三个：
 
 - 将控制协议与 Isaac Sim 日志输出彻底分离，避免 stdout 污染协议解析。
@@ -20,6 +27,37 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
   --control-socket-path <socket_path>
 ```
 
+当前仓库内建议 API 层直接复用 `simworker/sim_manager.py` 中的 `SimManager`，而不是自行重复实现一套 `subprocess + socket` 管理逻辑。
+
+`SimManager` 的职责建议固定为：
+
+- 维护 API 层全局唯一的一份 `worker` 进程句柄。
+- 创建 `session_dir` 与 `control_socket_path`。
+- 通过 Isaac Sim 的 `python.sh` 拉起 `worker`。
+- 用 `hello` 作为 ready probe，确认 `worker` 已经可用。
+- 对 API 层暴露 `hello`、`list_table_env`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`shutdown` 等高层方法。
+- `SimManager` 只负责控制面，不负责 stream 数据面的读取实现；例如打开 shared memory、读取 `rgb24` 帧、解析 `latest_frame_v1` header、封装 reader SDK 等，都应由 API 层自行处理。
+
+推荐用法示例如下：
+
+```python
+from simworker.sim_manager import SimManager
+
+sim_manager = SimManager(
+    session_dir="/tmp/simworker-session",
+    control_socket_path="/tmp/simworker.sock",
+    python_bin="/root/isaacsim/python.sh",
+)
+
+sim_manager.hello()
+sim_manager.list_table_env()
+sim_manager.list_camera()
+sim_manager.load_table_env("default")
+camera_info = sim_manager.get_camera_info("table_top")
+stream_info = sim_manager.start_camera_stream("table_top")
+sim_manager.stop_camera_stream(stream_info["stream"]["id"])
+```
+
 建议约定如下启动参数：
 
 - `--session-dir`
@@ -33,6 +71,8 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 - `control-socket-path` 不传输图片、深度图、视频帧或其他二进制文件本体。
 - `control-socket-path` 只传输结构化 JSON 控制消息，以及 artifact 引用、stream 引用等元数据。
 - 如果后续实现里需要传输图片、深度图或视频，这些数据必须走独立数据面，而不是复用 `control-socket-path`。
+- `SimManager` 在 stream 相关场景下也只负责发起 `start_camera_stream` / `stop_camera_stream` 并返回 `stream.ref`；它本身不应再承担数据面 reader 的职责。
+- 当前实现里同一时刻只允许存在一个 `Worker` 进程；控制命令、world step、相机快照和 stream 刷新都在这个唯一 `Worker` 进程内完成。
 - `worker` 启动阶段会先加载固定基础环境，包括地面、灯光、桌子、机械臂和默认相机；这部分是实现前提，不需要单独暴露成控制面状态字段。
 - `hello` 里的 `objects.object_count` 只统计后续通过 `load_table_env` 加入的桌面对象，不包含基础环境元素。
 
@@ -293,19 +333,20 @@ session_dir/
 - 不允许某个 camera stream 为了取帧再单独维护另一套 `world.step(...)` 循环。
 - `run_task` 和 camera stream 共享的是同一个仿真主循环产出的 step，而不是分别拥有自己的 step。
 
-推荐实现为“单一仿真主循环 + 多功能挂接”：
+推荐实现为“单 Worker 进程主循环 + 多功能挂接”：
 
-1. `worker` 内部维护一个唯一的 simulation loop。
-2. 当前任务以“任务控制器 / 状态机”的形式挂接到该 loop 上。
-3. 每次 loop 迭代时，先推进任务控制器一小步。
-4. 然后调用一次 `world.step(render=True)`。
-5. step 完成后，如果存在活跃 stream，则在这一帧之后读取相机数据并覆盖写入 latest-frame buffer。
-6. 如果任务已经完成，则把结果状态写回给等待中的 `run_task` 控制面处理逻辑。
+1. `worker` 内部维护一个唯一的主循环。
+2. 主循环优先监听控制 socket，按顺序执行收到的控制命令。
+3. 当主循环暂时没有收到新的控制命令时，进入一次 idle tick。
+4. idle tick 中如果发现当前存在活跃 stream，且到了刷新周期，才调用一次 `world.step(render=True)`。
+5. step 完成后，读取相关相机数据并覆盖写入 latest-frame buffer。
+6. 如果未来接入 `run_task`，任务控制器也必须挂接在这个唯一主循环上，而不是再拆出第二个执行进程或第二套 step 循环。
 
 这种设计下：
 
 - `run_task` 的控制面请求仍然可以保持同步阻塞，直到任务完成才返回。
-- camera stream 仍然可以在后台持续更新，因为它依赖的是同一个 simulation loop，而不是独立线程里的第二套 `world.step(...)`。
+- camera stream 仍然可以持续更新，因为它依赖的是同一个 `Worker` 主循环空闲 tick，而不是独立进程、独立线程或第二套 `world.step(...)`。
+- 实际联调中，如果把 stream 更新从主 `Worker` 执行路径拆到额外并行执行路径里，容易导致 `hello` 等控制命令超时；因此当前实现明确收敛为“一个 `Worker` 进程 + 一个主循环”。
 - 机器人状态、物体状态和相机画面来自同一个 step 序列，因此时序是一致的。
 
 一个推荐的内部伪代码如下：
@@ -472,7 +513,7 @@ session_dir/
 
 1. `start_camera_stream` 到达后，`worker` 为该相机创建或复用一条流。
 2. `worker` 创建共享内存对象，初始化 `header` 默认值。
-3. `worker` 将该流注册到内部 simulation loop 中；后续每次共享的 `world.step(render=True)` 完成后，读取该相机最新帧并持续覆盖写入 `frame_data`。
+3. `worker` 将该流注册到内部主循环中；后续在主循环空闲 tick 里，如果到了刷新周期，则执行一次共享的 `world.step(render=True)`，并读取该相机最新帧持续覆盖写入 `frame_data`。
 4. 上层消费方根据 `stream.ref` 打开共享内存并读取最新帧。
 5. `stop_camera_stream` 到达后，`worker` 停止该流写入，并清理共享内存对象。
 6. `worker` 退出时，应清理自己创建的所有共享内存对象，避免遗留脏资源。
@@ -485,6 +526,7 @@ session_dir/
 - `worker` 异常退出后，`SimManager` 应具备补充清理能力，但主清理由 `worker` 负责。
 - 当前数据面按单读者设计，不为多读者并发访问定义额外协议保证。
 - camera stream 不应拥有独立于 simulation loop 的第二套 `world.step(...)` 调用点。
+- 更具体地说，当前实现不允许再拆出第二个 `Worker` 进程去负责 stream 刷新；stream 刷新必须留在唯一的 `Worker` 主循环内执行。
 
 #### 6.5 读写一致性
 
@@ -671,11 +713,11 @@ session_dir/
 - `default`
   由两个动态方块组成，适合最小联调和基础抓取验证。
 - `ycb`
-  由硬编码 YCB 物体组成，当前使用 `/root/Downloads/YCB/Axis_Aligned_Physics/` 下的可抓取资产。
+  由硬编码 YCB 物体组成，当前优先使用 `/root/Download/YCB/Axis_Aligned_Physics/` 下的可抓取资产；如主机仍保留旧目录，也兼容 `/root/Downloads/YCB/Axis_Aligned_Physics/`。
 
 对于 `ycb` 环境，当前阶段固定遵守以下约束：
 
-- 当前主机上的 YCB 资产目录按 `/root/Downloads/YCB` 约定。
+- 当前主机上的 YCB 资产目录按 `/root/Download/YCB` 约定；实现里同时兼容历史上的 `/root/Downloads/YCB`。
 - 优先使用 `Axis_Aligned_Physics` 版本资产，而不是只带视觉模型的普通版本。
 - 推荐通过 Isaac Sim 5.0.0 的 `add_reference_to_stage(usd_path=..., prim_path=...)` 把 USD 引用挂到 stage，再对根 prim 设置位姿、缩放以及刚体/碰撞属性。
 - 对动态 YCB 物体，初始 `z` 会放在桌面上方少量高度，让物体在若干个 `world.step(render=True)` 后自然落到桌面并稳定。
@@ -979,6 +1021,17 @@ session_dir/
 - 对同一个相机重复调用 `start_camera_stream` 时，推荐直接返回现有运行中流的信息，使该命令具备幂等性。
 - `stream.ref` 只表示内部数据面引用，具体底层字段可在后续单独细化。
 
+当前版本实现约束补充如下：
+
+- 当前只实现 `buffer_mode = latest_frame`。
+- 当前只实现 `pixel_format = rgb24`，不提供 depth stream。
+- 当前同一时刻每个相机最多维护一条 stream。
+- 当前整个系统只有一个 `Worker` 进程。
+- 当前由这个唯一 `Worker` 进程的主循环统一推进控制命令处理、`world.step(render=True)` 和 stream 刷新；当主循环空闲且到达刷新周期时，才会刷新全部活跃 stream。
+- 当前不为 stream 额外创建第二个 `Worker` 进程，也不再依赖并行后台执行路径去调用 Isaac Sim API。
+- 当前 `stream.ref.path` 的实际格式为 `shm://<shared_memory_name>`，供 API 层后续打开共享内存对象使用。
+- `SimManager` 在这里的职责到返回 `stream.ref` 为止，不负责 shared memory 打开、帧读取、像素解码或任何 reader 封装。
+
 #### 7.9 `stop_camera_stream`
 
 `stop_camera_stream` 用于停止一条已经启动的内部相机流。
@@ -1038,7 +1091,7 @@ session_dir/
   "payload": {
     "task": {
       "id": "task-001",
-      "codex": "def run():\\n    return {}"
+      "code": "def run():\\n    return {}"
     }
   }
 }

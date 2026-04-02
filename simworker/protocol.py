@@ -157,12 +157,20 @@ class UnixSocketControlServer:
         self,
         handle_request: Callable[[ControlRequest], ControlResponse],
         should_stop: Callable[[], bool],
+        idle_callback: Callable[[], None] | None = None,
+        poll_interval_sec: float = 0.05,
     ) -> None:
         if self._server_socket is None:
             raise RuntimeError("server socket is not started")
 
+        self._server_socket.settimeout(poll_interval_sec)
         while not should_stop():
-            conn, _ = self._server_socket.accept()
+            try:
+                conn, _ = self._server_socket.accept()
+            except TimeoutError:
+                if idle_callback is not None:
+                    idle_callback()
+                continue
             self._logger.info("Accepted control connection on %s", self._socket_path)
             with conn:
                 while not should_stop():
@@ -194,6 +202,8 @@ class UnixSocketControlServer:
                         )
 
                     send_json_message(conn, response.to_json_obj())
+                    if idle_callback is not None:
+                        idle_callback()
                     if should_stop():
                         return
 

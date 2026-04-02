@@ -27,7 +27,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         dispatcher = CommandDispatcher(runtime)
         with UnixSocketControlServer(Path(args.control_socket_path), runtime.logger) as server:
             # 控制面保持同步请求/同步响应；是否退出由 runtime 状态统一决定。
-            server.serve(handle_request=dispatcher.handle, should_stop=lambda: runtime.shutdown_requested)
+            server.serve(
+                handle_request=dispatcher.handle,
+                should_stop=lambda: runtime.shutdown_requested,
+                idle_callback=runtime.publish_camera_stream_frames_if_due,
+            )
     except Exception:
         if runtime is None:
             print("Failed to bootstrap simworker runtime", file=sys.stderr)

@@ -13,7 +13,11 @@ from simworker.table_environments.common import (
 if TYPE_CHECKING:
     from simworker.runtime import WorkerRuntime
 
-_YCB_PHYSICS_ROOT = Path("/root/Downloads/YCB/Axis_Aligned_Physics")
+# 线上主机当前按 ~/Download/YCB 部署，但为了兼容历史环境也接受 ~/Downloads/YCB。
+_YCB_PHYSICS_ROOT_CANDIDATES = (
+    Path("/root/Download/YCB/Axis_Aligned_Physics"),
+    Path("/root/Downloads/YCB/Axis_Aligned_Physics"),
+)
 _YCB_OBJECTS = (
     {
         "object_id": "cracker_box_1",
@@ -85,12 +89,22 @@ def load_ycb_table_environment(runtime: WorkerRuntime) -> list[object]:
 
 
 def _require_ycb_asset(filename: str) -> Path:
-    asset_path = _YCB_PHYSICS_ROOT / filename
+    physics_root = _resolve_ycb_physics_root()
+    asset_path = physics_root / filename
     if not asset_path.exists():
         raise ValueError(f"missing YCB asset: {asset_path}")
     if not asset_path.is_file():
         raise ValueError(f"YCB asset path is not a file: {asset_path}")
     return asset_path
+
+
+def _resolve_ycb_physics_root() -> Path:
+    for candidate in _YCB_PHYSICS_ROOT_CANDIDATES:
+        if candidate.exists():
+            return candidate
+
+    candidate_text = ", ".join(str(path) for path in _YCB_PHYSICS_ROOT_CANDIDATES)
+    raise ValueError(f"missing YCB asset root; checked: {candidate_text}")
 
 
 def _apply_usd_asset_dynamic_physics(root_prim: object, *, disable_gravity: bool) -> None:

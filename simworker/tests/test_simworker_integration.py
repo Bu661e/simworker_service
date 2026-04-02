@@ -6,11 +6,13 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from simworker.camera_streams import decode_latest_frame_header, latest_frame_header_size_bytes
 from simworker.protocol import recv_json_message, send_json_message
 
 _ENABLE_REAL_TEST_ENV = "SIMWORKER_RUN_ISAACSIM_TESTS"
@@ -18,7 +20,10 @@ _WORKER_PYTHON_ENV = "SIMWORKER_TEST_PYTHON"
 _STARTUP_TIMEOUT_SEC = 240.0
 _SHUTDOWN_TIMEOUT_SEC = 60.0
 _REQUEST_TIMEOUT_SEC = 60.0
-_YCB_ASSET_ROOT = Path("/root/Downloads/YCB/Axis_Aligned_Physics")
+_YCB_ASSET_ROOT_CANDIDATES = (
+    Path("/root/Download/YCB/Axis_Aligned_Physics"),
+    Path("/root/Downloads/YCB/Axis_Aligned_Physics"),
+)
 
 
 @dataclass(frozen=True)
@@ -30,7 +35,7 @@ class WorkerProcessHandle:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _worker_python() -> str:
@@ -106,6 +111,19 @@ def _assert_object_transform_payload(object_payload: dict[str, Any]) -> None:
     assert len(scale_xyz) == 3
     assert all(isinstance(value, float) for value in scale_xyz)
     assert all(value > 0.0 for value in scale_xyz)
+
+
+def _stream_ref_name(stream_ref_path: str) -> str:
+    if not stream_ref_path.startswith("shm://"):
+        raise ValueError(f"unexpected shared memory path: {stream_ref_path}")
+    return stream_ref_path.removeprefix("shm://")
+
+
+def _find_existing_ycb_asset_root() -> Path | None:
+    for candidate in _YCB_ASSET_ROOT_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _shutdown_worker(handle: WorkerProcessHandle) -> None:
@@ -346,6 +364,142 @@ def test_simworker_camera_roundtrip(simworker_process: WorkerProcessHandle) -> N
     assert invalid_camera_response["error_message"] == "camera.id missing_camera does not exist"
 
 
+def test_simworker_camera_stream_roundtrip(simworker_process: WorkerProcessHandle) -> None:
+    start_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-start-stream",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_top",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-start-stream",
+    )
+    assert start_stream_payload["camera"] == {"id": "table_top"}
+
+    stream_payload = start_stream_payload["stream"]
+    assert stream_payload["status"] == "running"
+    assert stream_payload["buffer_mode"] == "latest_frame"
+    assert stream_payload["pixel_format"] == "rgb24"
+    assert stream_payload["resolution"] == [640, 640]
+    assert stream_payload["ref"]["kind"] == "shared_memory"
+    assert stream_payload["ref"]["layout"] == "latest_frame_v1"
+
+    hello_after_start_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-stream-start",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-stream-start",
+    )
+    assert hello_after_start_payload["streams"]["active_count"] == 1
+
+    shm_name = _stream_ref_name(stream_payload["ref"]["path"])
+    header_size = latest_frame_header_size_bytes()
+    shm = shared_memory.SharedMemory(name=shm_name, create=False)
+    try:
+        deadline = time.monotonic() + 5.0
+        header = decode_latest_frame_header(shm.buf[:header_size])
+        while time.monotonic() < deadline and header["data_size_bytes"] == 0:
+            time.sleep(0.1)
+            header = decode_latest_frame_header(shm.buf[:header_size])
+
+        assert header["magic"] == "SIMSTRM1"
+        assert header["layout"] == "latest_frame_v1"
+        assert header["pixel_format"] == "rgb24"
+        assert header["width"] == 640
+        assert header["height"] == 640
+        assert header["data_size_bytes"] > 0
+        assert header["frame_capacity_bytes"] >= header["data_size_bytes"]
+        assert header["frame_id"] >= 1
+        assert header["seq"] % 2 == 0
+    finally:
+        shm.close()
+
+    # 对同一个相机重复启动流时应复用已有流，而不是再创建一条新的共享内存流。
+    restart_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-start-stream-again",
+                "command_type": "start_camera_stream",
+                "payload": {
+                    "camera": {
+                        "id": "table_top",
+                    },
+                    "stream": {
+                        "buffer_mode": "latest_frame",
+                    },
+                },
+            },
+        ),
+        "req-start-stream-again",
+    )
+    assert restart_stream_payload["stream"]["id"] == stream_payload["id"]
+    assert restart_stream_payload["stream"]["ref"]["path"] == stream_payload["ref"]["path"]
+
+    stop_stream_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-stop-stream",
+                "command_type": "stop_camera_stream",
+                "payload": {
+                    "stream": {
+                        "id": stream_payload["id"],
+                    }
+                },
+            },
+        ),
+        "req-stop-stream",
+    )
+    assert stop_stream_payload["stream"] == {"id": stream_payload["id"], "status": "stopped"}
+
+    hello_after_stop_payload = _assert_success(
+        _send_request(
+            simworker_process.socket_path,
+            {
+                "request_id": "req-hello-after-stream-stop",
+                "command_type": "hello",
+                "payload": {},
+            },
+        ),
+        "req-hello-after-stream-stop",
+    )
+    assert hello_after_stop_payload["streams"]["active_count"] == 0
+
+    with pytest.raises(FileNotFoundError):
+        orphan_shm = shared_memory.SharedMemory(name=shm_name, create=False)
+        orphan_shm.close()
+
+    invalid_stop_response = _send_request(
+        simworker_process.socket_path,
+        {
+            "request_id": "req-stop-stream-missing",
+            "command_type": "stop_camera_stream",
+            "payload": {
+                "stream": {
+                    "id": stream_payload["id"],
+                }
+            },
+        },
+    )
+    assert invalid_stop_response["ok"] is False
+    assert invalid_stop_response["error_message"] == f"stream.id {stream_payload['id']} does not exist"
+
+
 def test_simworker_load_default_table_env_and_query_objects(simworker_process: WorkerProcessHandle) -> None:
     before_load_payload = _assert_success(
         _send_request(
@@ -467,8 +621,10 @@ def test_simworker_rejects_unsupported_table_env(simworker_process: WorkerProces
 
 
 def test_simworker_load_ycb_table_env_and_query_objects(simworker_process: WorkerProcessHandle) -> None:
-    if not _YCB_ASSET_ROOT.exists():
-        pytest.skip(f"YCB 资产目录不存在: {_YCB_ASSET_ROOT}")
+    ycb_asset_root = _find_existing_ycb_asset_root()
+    if ycb_asset_root is None:
+        checked_paths = ", ".join(str(path) for path in _YCB_ASSET_ROOT_CANDIDATES)
+        pytest.skip(f"YCB 资产目录不存在: {checked_paths}")
 
     load_ycb_payload = _assert_success(
         _send_request(
