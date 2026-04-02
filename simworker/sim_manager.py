@@ -16,6 +16,11 @@ _DEFAULT_REQUEST_TIMEOUT_SEC = 60.0
 _DEFAULT_SHUTDOWN_TIMEOUT_SEC = 60.0
 
 
+def _default_session_dir() -> Path:
+    # 默认把 SimManager 的会话目录收敛到仓库内的 simworker/runs，方便集中查看日志与产物。
+    return Path(__file__).resolve().parent / "runs"
+
+
 class SimManagerError(RuntimeError):
     def __init__(
         self,
@@ -35,7 +40,7 @@ class SimManager:
     def __init__(
         self,
         *,
-        session_dir: str | Path,
+        session_dir: str | Path | None = None,
         control_socket_path: str | Path,
         python_bin: str = sys.executable,
         worker_module: str = "simworker.entrypoint",
@@ -45,7 +50,8 @@ class SimManager:
         shutdown_timeout_sec: float = _DEFAULT_SHUTDOWN_TIMEOUT_SEC,
         extra_env: Mapping[str, str] | None = None,
     ) -> None:
-        self.session_dir = Path(session_dir).expanduser().resolve()
+        resolved_session_dir = _default_session_dir() if session_dir is None else Path(session_dir).expanduser()
+        self.session_dir = resolved_session_dir.resolve()
         self.control_socket_path = Path(control_socket_path).expanduser().resolve()
         self.python_bin = python_bin
         self.worker_module = worker_module

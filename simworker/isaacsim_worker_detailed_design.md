@@ -45,6 +45,11 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 - `close()`
   作为 API 层兜底清理入口；优先尝试优雅关闭，必要时最终直接回收子进程句柄。
 
+当前默认约定如下：
+
+- 如果构造 `SimManager(...)` 时不显式传 `session_dir`，默认使用仓库内的 `simworker/runs/`。
+- `worker` 每次启动后，仍然会在这个 `session_dir` 下继续创建独立的时间戳 `run_dir`。
+
 `SimManager` 的职责建议固定为：
 
 - 维护 API 层全局唯一的一份 `worker` 进程句柄。
@@ -62,7 +67,6 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 from simworker.sim_manager import SimManager
 
 sim_manager = SimManager(
-    session_dir="/tmp/simworker-session",
     control_socket_path="/tmp/simworker.sock",
     python_bin="/root/isaacsim/python.sh",
 )
