@@ -14,25 +14,45 @@ uv sync
 
 ## FastAPI 启动
 
-当前仓库已经完成 `uv` 环境初始化，但还没有正式落具体的 FastAPI app 入口文件。
+当前 FastAPI 入口文件是 [api/main.py](/root/simworker_service/api/main.py)。
 
-当 FastAPI 入口准备好之后，启动命令使用下面的形式：
+启动命令：
 
 ```bash
-uv run uvicorn <python_module>:app --host 0.0.0.0 --port 8000
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
 开发模式可使用：
 
 ```bash
-uv run uvicorn <python_module>:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-例如，如果后续入口文件是 `api/main.py`，并且其中定义了 `app = FastAPI()`，则启动命令为：
+安装测试依赖：
 
 ```bash
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+uv sync --group dev
 ```
+
+运行 API 骨架单元测试：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest tests/test_api_app.py -q
+```
+
+运行 FastAPI + 真实 Isaac Sim worker 集成测试：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+SIMWORKER_RUN_ISAACSIM_TESTS=1 \
+SIMWORKER_TEST_PYTHON=/root/isaacsim/python.sh \
+uv run pytest tests/test_api_app.py::test_fastapi_real_integration_exercises_non_stream_interfaces -q
+```
+
+说明：
+
+- 这里显式加 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`，是为了避免当前机器上的外部 ROS `pytest` 插件污染测试环境。
+- 第二条命令会真实启动 Isaac Sim worker，需要 GPU 环境可用。
 
 ## 相关文档
 
