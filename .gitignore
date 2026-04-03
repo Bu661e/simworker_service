@@ -10,6 +10,7 @@ __pycache__/
 simworker/.pytest_tmp/
 simworker/pytest_runs/
 .pytest_tmp/
+.pytest_tmp*/
 
 # 本地产生的覆盖率与测试产物
 .coverage
