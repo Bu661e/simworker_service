@@ -13,9 +13,10 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from api.mjpeg_stream import build_mjpeg_streaming_response
 from simworker import SimManager, SimManagerError
 
 logger = logging.getLogger("api")
@@ -103,6 +104,8 @@ class SimManagerLike(Protocol):
     def hello(self) -> dict[str, Any]: ...
     def list_camera(self) -> dict[str, Any]: ...
     def get_camera_info(self, camera_id: str) -> dict[str, Any]: ...
+    def start_camera_stream(self, camera_id: str, *, buffer_mode: str = "latest_frame") -> dict[str, Any]: ...
+    def stop_camera_stream(self, stream_id: str) -> dict[str, Any]: ...
     def list_table_env(self) -> dict[str, Any]: ...
     def load_table_env(self, table_env_id: str) -> dict[str, Any]: ...
     def get_table_env_objects_info(self) -> dict[str, Any]: ...
@@ -179,6 +182,14 @@ def create_app(
             filename=artifact_record.filename,
         )
 
+    @app.get("/cameras/{camera_id}/stream")
+    def stream_camera(
+        camera_id: str,
+        request: Request,
+        sim_manager: SimManagerLike = Depends(_get_sim_manager),
+    ) -> StreamingResponse:
+        return build_mjpeg_streaming_response(request, sim_manager, camera_id)
+
     @app.get("/table-envs")
     def list_table_envs(sim_manager: SimManager = Depends(_get_sim_manager)) -> dict[str, Any]:
         return _ok_payload(sim_manager.list_table_env())
@@ -222,6 +233,7 @@ def create_app(
         return _ok_payload(sim_manager.hello())
 
     return app
+
 
 def _build_sim_manager(settings: ApiSettings) -> SimManager:
     return SimManager(

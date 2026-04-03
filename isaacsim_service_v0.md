@@ -316,23 +316,26 @@
 - API 层内部需要：
   - 通过 `SimManager.start_camera_stream(camera_id)` 启动底层相机流
   - 从共享内存读取 `rgb24` 帧
-  - 自己做编码与对外发布
-  - 在最后一个客户端断开后，通过 `SimManager.stop_camera_stream(stream_id)` 回收底层流
+  - 将每帧编码为 JPEG
+  - 通过 HTTP `MJPEG` 对外发布
+  - 在客户端断开后，通过 `SimManager.stop_camera_stream(stream_id)` 回收底层流
 
 当前状态：
 
 - 当前对外接口路径先固定为 `GET /cameras/{camera_id}/stream`
-- 但内部究竟使用 `MJPEG` 还是 `WebRTC`，目前还没有最终决定
-- 两种方案都允许，它们都依赖同一个底层入口：
+- 当前实现已经固定为 `MJPEG`
+- 这是一个面向“单客户端、自用、非生产环境”的最小实现
+- 当前不做多客户端复用，不做订阅计数，不做复杂重连
+- 底层统一依赖：
   - `SimManager.start_camera_stream(camera_id)`
   - `SimManager.stop_camera_stream(stream_id)`
 
-实现方案 A：MJPEG
+实现方式：
 
 - API 层从共享内存读取 `rgb24` 帧
 - 把每帧编码成 JPEG
 - 通过 HTTP 流直接返回给前端
-- 响应头可使用：
+- 成功响应头固定为：
   - `Content-Type: multipart/x-mixed-replace; boundary=frame`
 - 每个 part 携带一帧 JPEG 图像
 
@@ -344,59 +347,56 @@
 
 缺点：
 
-- 带宽明显更高
+- 带宽明显高于压缩视频方案
 - 延迟通常高于 WebRTC
-- 后续如果要做更正式的实时视频系统，可扩展性一般
+- 当前实现只按单客户端场景做最小闭环，不提供更复杂的流管理能力
 
-实现方案 B：WebRTC
+后续扩展说明：
 
-- API 层从共享内存读取 `rgb24` 帧
-- 把帧送入 Python 侧 WebRTC 视频轨道
-- 前端通过浏览器原生 WebRTC 能力播放
-- API 层需要额外提供最小 signaling 能力
-
-当前对 WebRTC 的约束明确如下：
-
-- 只考虑一个客户端
-- 只考虑我自己使用
-- 不是生产环境
-- 不追求工业级稳定性
-- 不做多客户端复用
-- 不做复杂重连
-- 不做复杂监控
-- 优先做一个能跨公网在本地浏览器里看到画面的最小 demo
-- 可以直接使用公共 STUN
-- 当前不预设 TURN
-
-优点：
-
-- 带宽更低
-- 延迟更低
-- 更接近正式视频流方案
-
-缺点：
-
-- 实现复杂度明显高于 MJPEG
-- 需要处理 offer / answer / ICE 等最小 WebRTC 流程
-- 即便是最小 demo，也比 MJPEG 多一层 signaling 和媒体轨道封装
+- 如果后面确认需要更低延迟、更低带宽的视频预览，可以再单独新增 `WebRTC` 方案
+- 但这不属于当前 V0 已实现内容
 
 成功响应：
 
-- 如果内部实现选的是 MJPEG：
-  - HTTP `200 OK`
-  - `Content-Type: multipart/x-mixed-replace; boundary=frame`
-- 如果内部实现选的是 WebRTC：
-  - 该路径可以继续保留为占位入口
-  - 实际 signaling 可由 API 层另行定义，例如单独增加 `POST /webrtc/offer`
+- HTTP `200 OK`
+- `Content-Type: multipart/x-mixed-replace; boundary=frame`
 
 说明：
 
 - 该接口对客户端来说是单个 HTTP 视频流接口
-- 但对 API 层内部来说，需要维护 `camera_id -> 底层 stream_id` 的映射和订阅计数
-- 当前这一节只锁定三件事：
-  - 外部预览能力一定存在
-  - 底层一定依赖 `SimManager` 的相机流接口
-  - `MJPEG` 和 `WebRTC` 都是可选实现，但当前尚未最终拍板
+- 对 API 层内部来说，这一版只需要“收到请求就启动一条底层流，断开时回收”
+- 当前不额外维护多客户端订阅计数
+
+前端接入方式：
+
+- 由于当前返回的是标准 `MJPEG`，前端最简单的接法就是直接把该 URL 放进浏览器 `<img>` 标签的 `src`
+- 例如：
+
+```html
+<img
+  src="http://<your-host>:8000/cameras/table_top/stream"
+  alt="table_top stream"
+  style="max-width: 100%; height: auto;"
+/>
+```
+
+- 如果前端是 React，也同样直接写：
+
+```tsx
+export function CameraStream() {
+  return (
+    <img
+      src="http://<your-host>:8000/cameras/table_top/stream"
+      alt="table_top stream"
+      style={{ maxWidth: "100%", height: "auto" }}
+    />
+  );
+}
+```
+
+- 前端不需要自己解析 `multipart/x-mixed-replace`
+- 浏览器会持续接收并刷新 JPEG 帧
+- 如果后端返回的是 `ok=false` 的 JSON 错误，那么这个 `<img>` 不会正常显示，因此前端通常还应先调用一次 `GET /cameras` 或在页面上额外做错误兜底
 
 失败响应体示例：
 
@@ -779,8 +779,8 @@ PUT /table-env/current/default
 6. 客户端调用 `GET /robot/api`，获取当前可用机械臂动作 API 文本。
 7. 客户端调用 `PUT /table-env/current/{table_env_id}`，加载目标桌面环境。
 8. 客户端调用 `GET /table-env/current/objects`，获取当前桌面环境中的所有物体信息。
-9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取本次采集的 JSON 元数据、内外参与 RGB / Depth 下载链接。
-10. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动 / 复用 / 回收底层 simworker stream。
+9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取本次采集的 JSON 元数据、内参与 RGB / Depth 下载链接。
+10. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动并在断开时回收底层 simworker stream。
 11. 客户端结合：
     - `GET /table-env/current/objects`
     - `POST /cameras/{camera_id}/capture`

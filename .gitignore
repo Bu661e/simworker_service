@@ -12,6 +12,7 @@ simworker/.pytest_tmp_cases/
 simworker/pytest_runs/
 .pytest_tmp/
 .ipynb_checkpoints/
+.pytest_tmp*/
 
 # 本地产生的覆盖率与测试产物
 .coverage
