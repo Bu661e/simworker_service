@@ -19,13 +19,13 @@ uv sync
 启动命令：
 
 ```bash
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn api.main:app --host 0.0.0.0 --port 18080
 ```
 
 开发模式可使用：
 
 ```bash
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn api.main:app --host 0.0.0.0 --port 18080 --reload
 ```
 
 安装测试依赖：
@@ -66,5 +66,5 @@ uv run pytest tests/test_api_app.py::test_fastapi_real_integration_streams_mjpeg
 
 ## 相关文档
 
-- [isaacsim_service_v0.md](/root/simworker_service/isaacsim_service_v0.md)
+- [simworker_service.md](/root/simworker_service/simworker_service.md)
 - [simworker/sim_manager_introduction.md](/root/simworker_service/simworker/sim_manager_introduction.md)

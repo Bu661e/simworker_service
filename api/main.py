@@ -139,7 +139,7 @@ def create_app(
         finally:
             sim_manager.close()
 
-    app = FastAPI(title="IsaacSim Service V0", lifespan=lifespan)
+    app = FastAPI(title="IsaacSim Service", lifespan=lifespan)
     app.add_exception_handler(SimManagerError, _handle_sim_manager_error)
     app.add_exception_handler(ValueError, _handle_value_error)
     app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
