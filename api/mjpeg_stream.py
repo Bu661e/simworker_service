@@ -5,6 +5,7 @@ import io
 import logging
 import time
 from dataclasses import dataclass
+from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
 from typing import Any, AsyncIterator, Protocol
 
@@ -80,6 +81,7 @@ def _open_mjpeg_stream(sim_manager: StreamCapableSimManager, camera_id: str) -> 
     shm_name = _shared_memory_name_from_path(ref_path)
     try:
         shm = shared_memory.SharedMemory(name=shm_name, create=False)
+        _unregister_consumer_shared_memory(shm)
     except Exception:
         try:
             sim_manager.stop_camera_stream(stream_id)
@@ -160,6 +162,16 @@ def _shared_memory_name_from_path(ref_path: str) -> str:
     if not shm_name:
         raise ValueError("shared memory path is missing name")
     return shm_name
+
+
+def _unregister_consumer_shared_memory(shm: shared_memory.SharedMemory) -> None:
+    tracked_name = getattr(shm, "_name", None)
+    if not isinstance(tracked_name, str) or not tracked_name:
+        return
+    try:
+        resource_tracker.unregister(tracked_name, "shared_memory")
+    except Exception:
+        logger.debug("Failed to unregister shared memory from resource_tracker: %s", tracked_name, exc_info=True)
 
 
 def _wait_for_next_frame(

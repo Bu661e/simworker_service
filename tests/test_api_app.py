@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from api.mjpeg_stream import build_mjpeg_streaming_response
+from api.mjpeg_stream import _open_mjpeg_stream, build_mjpeg_streaming_response
 from api.main import ApiSettings, create_app
 from simworker.camera_streams import create_camera_stream_runtime_state
 from simworker import SimManagerError
@@ -457,6 +457,24 @@ def test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up(tmp_path: Pat
     assert b"\xff\xd8" in first_chunk
     assert any(call[0] == "start_camera_stream" for call in fake_manager.calls)
     assert any(call[0] == "stop_camera_stream" for call in fake_manager.calls)
+
+
+def test_open_mjpeg_stream_unregisters_consumer_shared_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_manager = _create_fake_manager(tmp_path)
+    unregister_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "api.mjpeg_stream.resource_tracker.unregister",
+        lambda name, rtype: unregister_calls.append((name, rtype)),
+    )
+
+    opened_stream = _open_mjpeg_stream(fake_manager, "table_top")
+    try:
+        tracked_name = getattr(opened_stream.shm, "_name")
+        assert unregister_calls == [(tracked_name, "shared_memory")]
+    finally:
+        opened_stream.shm.close()
+        fake_manager.stop_camera_stream(opened_stream.stream_id)
 
 
 def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
