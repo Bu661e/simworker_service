@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import io
-import json
 import logging
 import os
-import zipfile
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Protocol
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from simworker import SimManager, SimManagerError
@@ -44,6 +44,47 @@ class ApiSettings:
             request_timeout_sec=_float_env("SIMWORKER_REQUEST_TIMEOUT_SEC", 60.0),
             shutdown_timeout_sec=_float_env("SIMWORKER_SHUTDOWN_TIMEOUT_SEC", 60.0),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureArtifactRecord:
+    path: Path
+    media_type: str
+    filename: str
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureRecord:
+    capture_id: str
+    camera_id: str
+    created_at: str
+    artifacts: dict[str, CaptureArtifactRecord]
+
+
+class CaptureArtifactStore:
+    def __init__(self) -> None:
+        self._captures: dict[str, CaptureRecord] = {}
+        self._lock = Lock()
+
+    def save_capture(self, capture_record: CaptureRecord) -> None:
+        with self._lock:
+            self._captures[capture_record.capture_id] = capture_record
+
+    def get_artifact(self, capture_id: str, artifact_kind: str) -> CaptureArtifactRecord:
+        with self._lock:
+            capture_record = self._captures.get(capture_id)
+
+        if capture_record is None:
+            raise ValueError(f"capture.id {capture_id} does not exist")
+
+        artifact_record = capture_record.artifacts.get(artifact_kind)
+        if artifact_record is None:
+            raise ValueError(f"capture.id {capture_id} does not include artifact {artifact_kind}")
+
+        if not artifact_record.path.exists():
+            raise ValueError(f"artifact file does not exist: {artifact_record.path}")
+
+        return artifact_record
 
 
 class TaskSpec(BaseModel):
@@ -87,6 +128,7 @@ def create_app(
         sim_manager = resolved_factory(resolved_settings)
         app.state.settings = resolved_settings
         app.state.sim_manager = sim_manager
+        app.state.capture_artifact_store = CaptureArtifactStore()
         if start_manager_on_startup:
             sim_manager.ensure_started()
         try:
@@ -109,16 +151,32 @@ def create_app(
         return _ok_payload(sim_manager.list_camera())
 
     @app.post("/cameras/{camera_id}/capture")
-    def capture_camera(camera_id: str, sim_manager: SimManager = Depends(_get_sim_manager)) -> Response:
+    def capture_camera(
+        camera_id: str,
+        request: Request,
+        sim_manager: SimManager = Depends(_get_sim_manager),
+        artifact_store: CaptureArtifactStore = Depends(_get_capture_artifact_store),
+    ) -> dict[str, Any]:
         camera_info_payload = sim_manager.get_camera_info(camera_id)
-        archive_bytes = _build_camera_capture_zip(camera_info_payload)
-        archive_name = _build_capture_archive_name(camera_info_payload)
-        return Response(
-            content=archive_bytes,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f'attachment; filename="{archive_name}"',
-            },
+        return _ok_payload(
+            _build_camera_capture_response(
+                camera_info_payload,
+                request=request,
+                artifact_store=artifact_store,
+            )
+        )
+
+    @app.get("/captures/{capture_id}/artifacts/{artifact_kind}", name="download_capture_artifact")
+    def download_capture_artifact(
+        capture_id: str,
+        artifact_kind: str,
+        artifact_store: CaptureArtifactStore = Depends(_get_capture_artifact_store),
+    ) -> FileResponse:
+        artifact_record = artifact_store.get_artifact(capture_id, artifact_kind)
+        return FileResponse(
+            path=artifact_record.path,
+            media_type=artifact_record.media_type,
+            filename=artifact_record.filename,
         )
 
     @app.get("/table-envs")
@@ -182,6 +240,10 @@ def _get_sim_manager(request: Request) -> SimManagerLike:
     return request.app.state.sim_manager
 
 
+def _get_capture_artifact_store(request: Request) -> CaptureArtifactStore:
+    return request.app.state.capture_artifact_store
+
+
 def _ok_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
@@ -222,27 +284,82 @@ async def _handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
     return _json_error_response(f"unexpected error: {exc}")
 
 
-def _build_camera_capture_zip(camera_info_payload: dict[str, Any]) -> bytes:
-    rgb_path, depth_path = _resolve_camera_artifact_paths(camera_info_payload)
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("camera_info.json", json.dumps(camera_info_payload, ensure_ascii=False, indent=2))
-        archive.writestr("rgb.png", rgb_path.read_bytes())
-        archive.writestr("depth.npy", depth_path.read_bytes())
-    return buffer.getvalue()
-
-
-def _resolve_camera_artifact_paths(camera_info_payload: dict[str, Any]) -> tuple[Path, Path]:
+def _build_camera_capture_response(
+    camera_info_payload: dict[str, Any],
+    *,
+    request: Request,
+    artifact_store: CaptureArtifactStore,
+) -> dict[str, Any]:
     camera_payload = camera_info_payload.get("camera")
     if not isinstance(camera_payload, dict):
         raise ValueError("camera capture payload is missing camera object")
 
-    rgb_path = _extract_artifact_path(camera_payload, "rgb_image")
-    depth_path = _extract_artifact_path(camera_payload, "depth_image")
-    return rgb_path, depth_path
+    capture_id = f"capture-{uuid4().hex}"
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rgb_artifact = _build_capture_artifact_record(camera_payload, "rgb_image")
+    depth_artifact = _build_capture_artifact_record(camera_payload, "depth_image")
+    artifact_store.save_capture(
+        CaptureRecord(
+            capture_id=capture_id,
+            camera_id=_extract_camera_id(camera_payload),
+            created_at=created_at,
+            artifacts={
+                "rgb": rgb_artifact,
+                "depth": depth_artifact,
+            },
+        )
+    )
+
+    response_payload = deepcopy(camera_info_payload)
+    response_payload["capture"] = {
+        "id": capture_id,
+        "created_at": created_at,
+    }
+
+    response_camera_payload = response_payload.get("camera")
+    if not isinstance(response_camera_payload, dict):
+        raise ValueError("camera capture payload is missing camera object")
+
+    _replace_artifact_path_with_download_url(
+        response_camera_payload,
+        "rgb_image",
+        str(
+            request.url_for(
+                "download_capture_artifact",
+                capture_id=capture_id,
+                artifact_kind="rgb",
+            )
+        ),
+    )
+    _replace_artifact_path_with_download_url(
+        response_camera_payload,
+        "depth_image",
+        str(
+            request.url_for(
+                "download_capture_artifact",
+                capture_id=capture_id,
+                artifact_kind="depth",
+            )
+        ),
+    )
+    return response_payload
 
 
-def _extract_artifact_path(camera_payload: dict[str, Any], image_field_name: str) -> Path:
+def _build_capture_artifact_record(camera_payload: dict[str, Any], image_field_name: str) -> CaptureArtifactRecord:
+    ref_payload = _extract_artifact_ref(camera_payload, image_field_name)
+    content_type = ref_payload.get("content_type")
+    if not isinstance(content_type, str) or not content_type:
+        raise ValueError(f"camera payload is missing {image_field_name}.ref.content_type")
+
+    artifact_path = _extract_artifact_path(camera_payload, image_field_name)
+    return CaptureArtifactRecord(
+        path=artifact_path,
+        media_type=content_type,
+        filename=artifact_path.name,
+    )
+
+
+def _extract_artifact_ref(camera_payload: dict[str, Any], image_field_name: str) -> dict[str, Any]:
     image_payload = camera_payload.get(image_field_name)
     if not isinstance(image_payload, dict):
         raise ValueError(f"camera payload is missing {image_field_name}")
@@ -250,7 +367,11 @@ def _extract_artifact_path(camera_payload: dict[str, Any], image_field_name: str
     ref_payload = image_payload.get("ref")
     if not isinstance(ref_payload, dict):
         raise ValueError(f"camera payload is missing {image_field_name}.ref")
+    return ref_payload
 
+
+def _extract_artifact_path(camera_payload: dict[str, Any], image_field_name: str) -> Path:
+    ref_payload = _extract_artifact_ref(camera_payload, image_field_name)
     artifact_path = ref_payload.get("path")
     if not isinstance(artifact_path, str) or not artifact_path:
         raise ValueError(f"camera payload is missing {image_field_name}.ref.path")
@@ -261,15 +382,21 @@ def _extract_artifact_path(camera_payload: dict[str, Any], image_field_name: str
     return resolved_path
 
 
-def _build_capture_archive_name(camera_info_payload: dict[str, Any]) -> str:
-    camera_payload = camera_info_payload.get("camera")
-    camera_id = "camera"
-    if isinstance(camera_payload, dict):
-        payload_camera_id = camera_payload.get("id")
-        if isinstance(payload_camera_id, str) and payload_camera_id:
-            camera_id = payload_camera_id
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{camera_id}_{timestamp}.zip"
+def _replace_artifact_path_with_download_url(
+    camera_payload: dict[str, Any],
+    image_field_name: str,
+    download_url: str,
+) -> None:
+    ref_payload = _extract_artifact_ref(camera_payload, image_field_name)
+    ref_payload.pop("path", None)
+    ref_payload["download_url"] = download_url
+
+
+def _extract_camera_id(camera_payload: dict[str, Any]) -> str:
+    camera_id = camera_payload.get("id")
+    if not isinstance(camera_id, str) or not camera_id:
+        raise ValueError("camera payload is missing camera.id")
+    return camera_id
 
 
 def _float_env(env_name: str, default_value: float) -> float:

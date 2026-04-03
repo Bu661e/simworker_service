@@ -8,8 +8,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 simworker/.pytest_tmp/
+simworker/.pytest_tmp_cases/
 simworker/pytest_runs/
 .pytest_tmp/
+.ipynb_checkpoints/
 
 # 本地产生的覆盖率与测试产物
 .coverage

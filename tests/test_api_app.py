@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import textwrap
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -198,21 +196,66 @@ def test_health_endpoint_returns_ok_payload(tmp_path: Path) -> None:
     assert fake_manager.ensure_started_calls == 1
 
 
-def test_capture_endpoint_returns_zip_bundle(tmp_path: Path) -> None:
+def test_capture_endpoint_returns_json_payload_with_download_urls(tmp_path: Path) -> None:
     client, fake_manager = _create_test_client(tmp_path)
     with client:
         response = client.post("/cameras/table_top/capture")
     assert response.status_code == 200
-    assert response.headers["content-type"] == "application/zip"
-    assert "attachment;" in response.headers["content-disposition"]
+    response_payload = response.json()
+    assert response_payload["ok"] is True
+    assert response_payload["camera"]["id"] == "table_top"
+    assert response_payload["capture"]["id"].startswith("capture-")
+    assert response_payload["capture"]["created_at"].endswith("Z")
 
-    archive = zipfile.ZipFile(io.BytesIO(response.content))
-    assert sorted(archive.namelist()) == ["camera_info.json", "depth.npy", "rgb.png"]
-    camera_info = json.loads(archive.read("camera_info.json").decode("utf-8"))
-    assert camera_info["camera"]["id"] == "table_top"
-    assert archive.read("rgb.png") == _ONE_BY_ONE_PNG_BYTES
-    assert archive.read("depth.npy") == b"fake-npy-data"
+    rgb_ref = response_payload["camera"]["rgb_image"]["ref"]
+    depth_ref = response_payload["camera"]["depth_image"]["ref"]
+    assert rgb_ref["id"] == "artifact-rgb-001"
+    assert rgb_ref["kind"] == "artifact_file"
+    assert rgb_ref["content_type"] == "image/png"
+    assert "path" not in rgb_ref
+    assert rgb_ref["download_url"] == (
+        f"http://testserver/captures/{response_payload['capture']['id']}/artifacts/rgb"
+    )
+    assert depth_ref["id"] == "artifact-depth-001"
+    assert depth_ref["kind"] == "artifact_file"
+    assert depth_ref["content_type"] == "application/x-npy"
+    assert "path" not in depth_ref
+    assert depth_ref["download_url"] == (
+        f"http://testserver/captures/{response_payload['capture']['id']}/artifacts/depth"
+    )
     assert ("get_camera_info", ("table_top",), {}) in fake_manager.calls
+
+
+def test_capture_artifact_download_endpoint_returns_binary_files(tmp_path: Path) -> None:
+    client, _ = _create_test_client(tmp_path)
+    with client:
+        capture_response = client.post("/cameras/table_top/capture")
+        capture_payload = capture_response.json()
+        capture_id = capture_payload["capture"]["id"]
+
+        rgb_response = client.get(f"/captures/{capture_id}/artifacts/rgb")
+        depth_response = client.get(f"/captures/{capture_id}/artifacts/depth")
+
+    assert rgb_response.status_code == 200
+    assert rgb_response.headers["content-type"] == "image/png"
+    assert "attachment;" in rgb_response.headers["content-disposition"]
+    assert rgb_response.content == _ONE_BY_ONE_PNG_BYTES
+
+    assert depth_response.status_code == 200
+    assert depth_response.headers["content-type"] == "application/x-npy"
+    assert "attachment;" in depth_response.headers["content-disposition"]
+    assert depth_response.content == b"fake-npy-data"
+
+
+def test_capture_artifact_download_endpoint_returns_json_error_for_unknown_capture(tmp_path: Path) -> None:
+    client, _ = _create_test_client(tmp_path)
+    with client:
+        response = client.get("/captures/capture-missing/artifacts/rgb")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "error_message": "capture.id capture-missing does not exist",
+    }
 
 
 def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
@@ -378,11 +421,8 @@ def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path
 
         capture_response = client.post("/cameras/table_top/capture")
         assert capture_response.status_code == 200
-        assert capture_response.headers["content-type"] == "application/zip"
-        capture_archive = zipfile.ZipFile(io.BytesIO(capture_response.content))
-        assert sorted(capture_archive.namelist()) == ["camera_info.json", "depth.npy", "rgb.png"]
-        capture_camera_info = json.loads(capture_archive.read("camera_info.json").decode("utf-8"))
-        assert capture_camera_info["camera"]["id"] == "table_top"
+        assert capture_response.json()["ok"] is True
+        assert capture_response.json()["camera"]["id"] == "table_top"
 
         run_task_response = client.post(
             "/robot/tasks",

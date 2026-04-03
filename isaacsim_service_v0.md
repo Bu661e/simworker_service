@@ -42,21 +42,26 @@
 
 - API 层内部只维护一个长期存活的 `SimManager`
 - API 服务启动时，推荐显式调用一次 `SimManager.ensure_started()`
-- 除“单帧采集 zip 接口”和“视频流接口”外，其余接口尽量直接映射 `SimManager`，不在 API 层重复发明一套状态机和协议
+- 除“单帧采集接口”、“采集产物下载接口”和“视频流接口”外，其余接口尽量直接映射 `SimManager`，不在 API 层重复发明一套状态机和协议
 - 除 `GET /cameras/{camera_id}/stream` 外，其余接口都采用同步请求-响应模式
 - `run_task` 也是同步接口：HTTP 请求会阻塞到任务执行完成或失败返回
 - 除下面两个成功响应例外外，其余接口响应体统一使用 JSON：
-  - `POST /cameras/{camera_id}/capture` 成功时返回 `zip`
+  - `GET /captures/{capture_id}/artifacts/{artifact_kind}` 成功时返回文件本体
   - `GET /cameras/{camera_id}/stream` 成功时返回视频流本体
 - API 层所有接口统一返回 HTTP `200 OK`
 - JSON 响应统一约定：
   - 成功时：`ok=true`，并带上业务字段
   - 失败时：`ok=false`，并用 `error_message` 表达错误原因
 - API 层尽量直接沿用对应 `SimManager` 方法返回的 payload，只在最外层补 `ok`
-- 这两个例外接口的处理原则如下：
+- 这三个特殊接口的处理原则如下：
   - 单帧采集接口：
     - API 层先调用 `SimManager.get_camera_info(camera_id)`
-    - 再把返回中的 RGB / Depth 产物与元数据打成一个 zip 返回
+    - 再把返回中的本地 artifact 路径改写成对外可下载的 `download_url`
+    - 并补充 `capture.id`、`capture.created_at`
+  - 采集产物下载接口：
+    - `POST /cameras/{camera_id}/capture` 返回的 `download_url` 就是指向这个接口的具体地址
+    - API 层根据 `capture.id + artifact_kind` 定位对应 artifact 文件
+    - 成功时直接返回文件本体，不额外包 `ok`
   - 视频流接口：
     - API 层需要自己处理共享内存读帧、编码和对外发布
     - 底层相机流的创建与销毁仍然通过 `SimManager.start_camera_stream()` / `SimManager.stop_camera_stream()` 完成
@@ -160,45 +165,36 @@
 }
 ```
 
-### 3. 采集单帧 RGBD 打包结果
+### 3. 采集单帧 RGBD 元数据与下载链接
+
+#### 3.1 采集单帧
 
 `POST /cameras/{camera_id}/capture`
 
-接口名称：采集单帧 RGBD 打包结果
+接口名称：采集单帧 RGBD 元数据
 
 接口作用：
 
 - 触发指定摄像头采集一帧 RGB 和 Depth
-- 将 RGB 编码为 `png`
-- 将 Depth 保存为 `npy`，保留原始浮点深度值
-- 将本次结果直接打包成一个 `zip` 二进制响应返回给客户端
-- 客户端拿到这个打包结果后，可以直接转发给另外一个服务器，或者本地解包使用
-- 该接口是 API 层的一个特例：它会先调用 `SimManager.get_camera_info(camera_id)`，再把结果重新打包
+- 返回本次结果对应的 JSON 元数据
+- JSON 中保留相机分辨率、内参、位姿等基础信息
+- RGB 图像和 Depth 图像不再直接跟随接口返回，而是分别提供下载链接
+- 该接口是 API 层的一个特例：它会先调用 `SimManager.get_camera_info(camera_id)`，再把结果中的本地 artifact 路径改写成下载链接
 
 成功响应：
 
 - HTTP `200 OK`
-- `Content-Type: application/zip`
+- `Content-Type: application/json`
 
-响应体说明：
-
-- 响应体本身就是一个 zip 文件，不是 JSON
-- 建议响应头包含：
-  - `Content-Disposition: attachment; filename="table_top_20260403_120000.zip"`
-
-zip 包内文件约定：
-
-- `rgb.png`
-- `depth.npy`
-- `camera_info.json`
-
-`camera_info.json` 约定：
-
-- 优先直接复用 `SimManager.get_camera_info(camera_id)` 的成功 payload
-- 也就是说，它的结构尽量保持为：
+响应体示例：
 
 ```json
 {
+  "ok": true,
+  "capture": {
+    "id": "capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1",
+    "created_at": "2026-04-03T04:00:00Z"
+  },
   "camera": {
     "id": "table_top",
     "status": "ready",
@@ -221,8 +217,8 @@ zip 包内文件约定：
       "ref": {
         "id": "artifact-rgb-001",
         "kind": "artifact_file",
-        "path": "/root/simworker_service/simworker/runs/.../artifacts/table_top_rgb_xxx.png",
-        "content_type": "image/png"
+        "content_type": "image/png",
+        "download_url": "http://api-host/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/rgb"
       }
     },
     "depth_image": {
@@ -230,8 +226,8 @@ zip 包内文件约定：
       "ref": {
         "id": "artifact-depth-001",
         "kind": "artifact_file",
-        "path": "/root/simworker_service/simworker/runs/.../artifacts/table_top_depth_xxx.npy",
-        "content_type": "application/x-npy"
+        "content_type": "application/x-npy",
+        "download_url": "http://api-host/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/depth"
       }
     }
   }
@@ -240,9 +236,24 @@ zip 包内文件约定：
 
 说明：
 
-- `camera_info.json` 中当前允许保留 `SimManager` 原始返回里的本地 artifact 路径
-- 调用方真正需要直接使用的文件仍然是 zip 中的 `rgb.png` 和 `depth.npy`
-- 这样可以最大程度复用 `SimManager` 已有 JSON 结构，减少 API 层重新组织字段的成本
+- `capture.id` 是 API 层生成的本次采集记录标识，用于后续下载接口。
+- `download_url` 是 API 层对外暴露的 artifact 下载地址，不直接暴露 worker 本地文件路径。
+- 客户端拿到 `download_url` 后，直接发起一次 `GET` 请求即可下载对应文件；不需要再做别的转换。
+- `pose` 仍然保留，方便兼容上层已有调用方。
+- 当前下载链接由 API 进程内存中的 `capture.id -> artifact` 映射维护；如果 API 服务重启，旧链接不保证继续可用。
+
+前端推荐使用方式：
+
+1. 前端调用 `POST /cameras/{camera_id}/capture`，拿到本次采集的 JSON 响应。
+2. 前端从响应中直接读取：
+   - `camera.resolution`
+   - `camera.intrinsics`
+   - `camera.pose`
+   - `camera.rgb_image.ref.download_url`
+   - `camera.depth_image.ref.download_url`
+3. 如果前端当前只需要元数据用于展示、标注或传给上层逻辑，可以只消费 JSON，不立即下载图片文件。
+4. 如果前端需要显示 RGB 图像或拿到深度文件，则直接 `GET` 对应的 `download_url`。
+5. 前端通常不需要自己拼接 `capture.id` 或 `artifact_kind`，直接使用 3.1 返回的 URL 即可。
 
 失败响应体示例：
 
@@ -250,6 +261,45 @@ zip 包内文件约定：
 {
   "ok": false,
   "error_message": "camera.id table_top_xxx does not exist"
+}
+```
+
+#### 3.2 下载单个采集产物
+
+`GET /captures/{capture_id}/artifacts/{artifact_kind}`
+
+接口名称：下载单个采集产物
+
+接口作用：
+
+- 下载某次 `capture` 产生的单个文件型产物
+- `POST /cameras/{camera_id}/capture` 响应里的 `download_url` 就是这个接口的完整地址
+- 这一节主要是说明 `download_url` 最终落到哪个 API 路径，以及该路径返回什么内容
+- 当前 `artifact_kind` 只支持：
+  - `rgb`
+  - `depth`
+- 该接口是 API 层的数据面接口，不再经过 `SimManager`
+
+调用建议：
+
+- 外部调用方通常不需要手工拼接或单独记忆这个接口路径。
+- 对外推荐使用方式仍然是：先调用 3.1，再直接请求 3.1 返回的 `download_url`。
+- 只有在调试、排查问题、或明确知道 `capture_id` 与 `artifact_kind` 的情况下，才需要显式关注这个路径模板。
+
+成功响应：
+
+- HTTP `200 OK`
+- `artifact_kind = rgb` 时，`Content-Type: image/png`
+- `artifact_kind = depth` 时，`Content-Type: application/x-npy`
+- 建议响应头包含：
+  - `Content-Disposition: attachment; filename="table_top_rgb_04-00-00-000001.png"`
+
+失败响应体示例：
+
+```json
+{
+  "ok": false,
+  "error_message": "capture.id capture-missing does not exist"
 }
 ```
 
@@ -729,7 +779,7 @@ PUT /table-env/current/default
 6. 客户端调用 `GET /robot/api`，获取当前可用机械臂动作 API 文本。
 7. 客户端调用 `PUT /table-env/current/{table_env_id}`，加载目标桌面环境。
 8. 客户端调用 `GET /table-env/current/objects`，获取当前桌面环境中的所有物体信息。
-9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取一个包含 `rgb.png`、`depth.npy`、`camera_info.json` 的 zip 包。
+9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取本次采集的 JSON 元数据、内外参与 RGB / Depth 下载链接。
 10. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动 / 复用 / 回收底层 simworker stream。
 11. 客户端结合：
     - `GET /table-env/current/objects`
