@@ -49,10 +49,20 @@ SIMWORKER_TEST_PYTHON=/root/isaacsim/python.sh \
 uv run pytest tests/test_api_app.py::test_fastapi_real_integration_exercises_non_stream_interfaces -q
 ```
 
+运行 FastAPI + 真实 Isaac Sim worker 的 MJPEG 拉流测试：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+SIMWORKER_RUN_ISAACSIM_TESTS=1 \
+SIMWORKER_TEST_PYTHON=/root/isaacsim/python.sh \
+uv run pytest tests/test_api_app.py::test_fastapi_real_integration_streams_mjpeg_frames -q
+```
+
 说明：
 
 - 这里显式加 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`，是为了避免当前机器上的外部 ROS `pytest` 插件污染测试环境。
 - 第二条命令会真实启动 Isaac Sim worker，需要 GPU 环境可用。
+- 当前视频流方案已经固定为 `MJPEG`。
 
 ## 相关文档
 
