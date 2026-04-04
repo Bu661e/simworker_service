@@ -11,7 +11,7 @@
 ## 基本原则
 - 只支持单用户、单 worker
 - 如果 worker 状态异常，选择重启，而不是做复杂恢复
-- 如果 worker 已经加载了桌面物体，不在原 worker 上清理，直接报错并重启 worker
+- 如果只是需要切换桌面环境，优先在原 worker 上清空当前 `table_env`，而不是直接重启 worker
 
 - 不考虑多租户，不考虑并发调度
 - 不优先追求通用性，优先追求简单可用
@@ -461,7 +461,7 @@ export function CameraStream() {
 - 根据 `table_env_id` 加载一套预设桌面环境
 - 该接口直接映射 `SimManager.load_table_env(table_env_id)`
 - API 层不再自己维护“清空场景后再加载”的逻辑
-- 当前 worker 生命周期内只允许加载一个 `table_env`
+- 同一时刻最多只允许存在一套已加载的 `table_env`
 
 URL 示例：
 
@@ -498,7 +498,7 @@ PUT /table-env/current/default
 
 - 如果当前还没加载任何环境，则会实际执行加载
 - 如果已经加载了同一个 `table_env_id`，则直接返回当前环境信息
-- 如果已经加载了另一个 `table_env_id`，则返回 `ok=false`
+- 如果已经加载了另一个 `table_env_id`，则返回 `ok=false`，调用方应先调用 `DELETE /table-env/current`
 
 失败响应体示例：
 
@@ -509,7 +509,57 @@ PUT /table-env/current/default
 }
 ```
 
-### 7. 获取当前桌面环境中的物体信息
+### 7. 清空当前桌面环境
+
+`DELETE /table-env/current`
+
+接口名称：清空当前桌面环境
+
+接口作用：
+
+- 清空当前 worker 中由 `table_env` 加载出来的桌面物体
+- 该接口直接映射 `SimManager.clear_table_env()`
+- 只影响当前桌面环境对象，不删除桌子、机械臂、相机、地面、灯光等基础环境
+- 该接口用于“切换到另一套桌面环境前先清空当前环境”
+
+成功响应：
+
+- HTTP `200 OK`
+
+响应体示例：
+
+```json
+{
+  "ok": true,
+  "table_env": {
+    "loaded": false,
+    "id": null,
+    "status": "cleared"
+  },
+  "previous_table_env_id": "default",
+  "object_count": 0,
+  "objects": []
+}
+```
+
+状态约定：
+
+- 如果当前存在已加载环境，则清空成功后返回 `table_env.loaded=false`
+- 如果当前本来就没有已加载环境，也按幂等方式返回成功；此时 `table_env.status="empty"`、`previous_table_env_id=null`
+- 前端如需切换环境，推荐调用顺序是：
+  - `DELETE /table-env/current`
+  - `PUT /table-env/current/{table_env_id}`
+
+失败响应体示例：
+
+```json
+{
+  "ok": false,
+  "error_message": "worker unavailable"
+}
+```
+
+### 8. 获取当前桌面环境中的物体信息
 
 `GET /table-env/current/objects`
 
@@ -572,7 +622,7 @@ PUT /table-env/current/default
 ```
 
 
-### 8. 获取机械臂状态
+### 9. 获取机械臂状态
 
 `GET /robot/status`
 
@@ -608,7 +658,7 @@ PUT /table-env/current/default
 }
 ```
 
-### 9. 获取机械臂 API 说明
+### 10. 获取机械臂 API 说明
 
 `GET /robot/api`
 
@@ -643,7 +693,7 @@ PUT /table-env/current/default
 }
 ```
 
-### 10. 执行机械臂任务
+### 11. 执行机械臂任务
 
 `POST /robot/tasks`
 
@@ -716,7 +766,7 @@ PUT /table-env/current/default
 }
 ```
 
-### 11. 手动重启 Worker
+### 12. 手动重启 Worker
 
 `POST /worker/restart`
 
@@ -779,13 +829,14 @@ PUT /table-env/current/default
 6. 客户端调用 `GET /robot/api`，获取当前可用机械臂动作 API 文本。
 7. 客户端调用 `PUT /table-env/current/{table_env_id}`，加载目标桌面环境。
 8. 客户端调用 `GET /table-env/current/objects`，获取当前桌面环境中的所有物体信息。
-9. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取本次采集的 JSON 元数据、内参与 RGB / Depth 下载链接。
-10. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动并在断开时回收底层 simworker stream。
-11. 客户端结合：
+9. 如果需要切换到另一套环境，先调用 `DELETE /table-env/current`，再调用新的 `PUT /table-env/current/{table_env_id}`。
+10. 客户端按需调用 `POST /cameras/{camera_id}/capture`，获取本次采集的 JSON 元数据、内参与 RGB / Depth 下载链接。
+11. 如果前端需要实时预览，则打开 `GET /cameras/{camera_id}/stream`；API 层内部负责启动并在断开时回收底层 simworker stream。
+12. 客户端结合：
     - `GET /table-env/current/objects`
     - `POST /cameras/{camera_id}/capture`
     - `GET /robot/api`
     生成 `run(robot, objects)` 形式的任务代码。
-12. 客户端调用 `POST /robot/tasks`，提交任务对象并同步等待执行结果。
-13. 执行期间或执行完成后，客户端可以调用 `GET /health` 或 `GET /robot/status` 查看状态。
-14. 如果需要重新回到干净状态，客户端可调用 `POST /worker/restart`；成功返回后，新 worker 仍只有基础环境，没有自动恢复任何 `table_env`。
+13. 客户端调用 `POST /robot/tasks`，提交任务对象并同步等待执行结果。
+14. 执行期间或执行完成后，客户端可以调用 `GET /health` 或 `GET /robot/status` 查看状态。
+15. 如果需要重新回到干净状态，客户端也可以调用 `POST /worker/restart`；成功返回后，新 worker 仍只有基础环境，没有自动恢复任何 `table_env`。

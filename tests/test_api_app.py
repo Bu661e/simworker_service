@@ -42,6 +42,7 @@ class FakeSimManager:
         self.raise_on: dict[str, Exception] = {}
         self.stream_counter = 0
         self.stream_states: dict[str, object] = {}
+        self.current_table_env_id: str | None = None
 
     def ensure_started(self) -> "FakeSimManager":
         self.ensure_started_calls += 1
@@ -57,8 +58,11 @@ class FakeSimManager:
         self.calls.append(("hello", (), {}))
         return {
             "worker": {"status": "ready"},
-            "table_env": {"loaded": False, "id": None},
-            "objects": {"object_count": 0},
+            "table_env": {
+                "loaded": self.current_table_env_id is not None,
+                "id": self.current_table_env_id,
+            },
+            "objects": {"object_count": len(self._current_table_env_objects())},
             "robot": {"status": "idle", "current_task_id": None},
             "streams": {"active_count": 0},
         }
@@ -124,28 +128,46 @@ class FakeSimManager:
     def load_table_env(self, table_env_id: str) -> dict[str, Any]:
         self._maybe_raise("load_table_env")
         self.calls.append(("load_table_env", (table_env_id,), {}))
+        if self.current_table_env_id is not None and self.current_table_env_id != table_env_id:
+            raise ValueError(
+                f"table_env_id {table_env_id} does not match current loaded table_env_id {self.current_table_env_id}"
+            )
+        self.current_table_env_id = table_env_id
         return {
             "table_env": {"id": table_env_id, "status": "loaded"},
-            "objects": [{"id": "red_cube"}, {"id": "blue_cube"}],
-            "object_count": 2,
+            "objects": [{"id": item["id"]} for item in self._current_table_env_objects()],
+            "object_count": len(self._current_table_env_objects()),
+        }
+
+    def clear_table_env(self) -> dict[str, Any]:
+        self._maybe_raise("clear_table_env")
+        self.calls.append(("clear_table_env", (), {}))
+        previous_table_env_id = self.current_table_env_id
+        if previous_table_env_id is None:
+            return {
+                "table_env": {"loaded": False, "id": None, "status": "empty"},
+                "previous_table_env_id": None,
+                "object_count": 0,
+                "objects": [],
+            }
+        self.current_table_env_id = None
+        return {
+            "table_env": {"loaded": False, "id": None, "status": "cleared"},
+            "previous_table_env_id": previous_table_env_id,
+            "object_count": 0,
+            "objects": [],
         }
 
     def get_table_env_objects_info(self) -> dict[str, Any]:
         self._maybe_raise("get_table_env_objects_info")
         self.calls.append(("get_table_env_objects_info", (), {}))
         return {
-            "table_env": {"loaded": True, "id": "default"},
-            "object_count": 2,
-            "objects": [
-                {
-                    "id": "red_cube",
-                    "pose": {
-                        "position_xyz_m": [0.2, 0.0, 1.55],
-                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
-                    },
-                    "scale_xyz": [0.06, 0.06, 0.06],
-                }
-            ],
+            "table_env": {
+                "loaded": self.current_table_env_id is not None,
+                "id": self.current_table_env_id,
+            },
+            "object_count": len(self._current_table_env_objects()),
+            "objects": self._current_table_env_objects(),
         }
 
     def get_robot_status(self) -> dict[str, Any]:
@@ -212,6 +234,47 @@ class FakeSimManager:
         exc = self.raise_on.get(method_name)
         if exc is not None:
             raise exc
+
+    def _current_table_env_objects(self) -> list[dict[str, Any]]:
+        if self.current_table_env_id == "default":
+            return [
+                {
+                    "id": "red_cube",
+                    "pose": {
+                        "position_xyz_m": [0.2, 0.0, 1.55],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "scale_xyz": [0.06, 0.06, 0.06],
+                },
+                {
+                    "id": "blue_cube",
+                    "pose": {
+                        "position_xyz_m": [0.3, 0.0, 1.55],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "scale_xyz": [0.06, 0.06, 0.06],
+                },
+            ]
+        if self.current_table_env_id == "ycb":
+            return [
+                {
+                    "id": "cracker_box_1",
+                    "pose": {
+                        "position_xyz_m": [0.2, 0.18, 1.55],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "scale_xyz": [1.0, 1.0, 1.0],
+                },
+                {
+                    "id": "mustard_bottle_1",
+                    "pose": {
+                        "position_xyz_m": [0.34, -0.1, 1.55],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "scale_xyz": [1.0, 1.0, 1.0],
+                },
+            ]
+        return []
 
 
 class _NeverDisconnectedRequest:
@@ -526,6 +589,8 @@ def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
         list_response = client.get("/table-envs")
         load_response = client.put("/table-env/current/default")
         objects_response = client.get("/table-env/current/objects")
+        clear_response = client.delete("/table-env/current")
+        objects_after_clear_response = client.get("/table-env/current/objects")
     assert list_response.status_code == 200
     assert list_response.json()["ok"] is True
     assert list_response.json()["table_env_count"] == 2
@@ -541,8 +606,26 @@ def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
     assert objects_response.status_code == 200
     assert objects_response.json()["ok"] is True
     assert objects_response.json()["table_env"] == {"loaded": True, "id": "default"}
+
+    assert clear_response.status_code == 200
+    assert clear_response.json() == {
+        "ok": True,
+        "table_env": {"loaded": False, "id": None, "status": "cleared"},
+        "previous_table_env_id": "default",
+        "object_count": 0,
+        "objects": [],
+    }
+
+    assert objects_after_clear_response.status_code == 200
+    assert objects_after_clear_response.json() == {
+        "ok": True,
+        "table_env": {"loaded": False, "id": None},
+        "object_count": 0,
+        "objects": [],
+    }
     assert ("list_table_env", (), {}) in fake_manager.calls
     assert ("load_table_env", ("default",), {}) in fake_manager.calls
+    assert ("clear_table_env", (), {}) in fake_manager.calls
     assert ("get_table_env_objects_info", (), {}) in fake_manager.calls
 
 
@@ -680,6 +763,23 @@ def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path
         assert table_env_objects_response.json()["ok"] is True
         assert table_env_objects_response.json()["table_env"] == {"loaded": True, "id": "default"}
         assert table_env_objects_response.json()["object_count"] == 2
+
+        clear_table_env_response = client.delete("/table-env/current")
+        assert clear_table_env_response.status_code == 200
+        assert clear_table_env_response.json()["ok"] is True
+        assert clear_table_env_response.json()["table_env"] == {"loaded": False, "id": None, "status": "cleared"}
+        assert clear_table_env_response.json()["previous_table_env_id"] == "default"
+
+        table_env_objects_after_clear_response = client.get("/table-env/current/objects")
+        assert table_env_objects_after_clear_response.status_code == 200
+        assert table_env_objects_after_clear_response.json()["ok"] is True
+        assert table_env_objects_after_clear_response.json()["table_env"] == {"loaded": False, "id": None}
+        assert table_env_objects_after_clear_response.json()["object_count"] == 0
+
+        reload_table_env_response = client.put("/table-env/current/default")
+        assert reload_table_env_response.status_code == 200
+        assert reload_table_env_response.json()["ok"] is True
+        assert reload_table_env_response.json()["table_env"] == {"id": "default", "status": "loaded"}
 
         capture_response = client.post("/cameras/table_top/capture")
         assert capture_response.status_code == 200
