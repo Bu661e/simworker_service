@@ -14,6 +14,7 @@ from simworker.robots import FrankaRobotAPI
 from simworker.table_environments import ensure_supported_table_environment_id, load_table_environment
 
 _CAMERA_CAPTURE_RENDER_STEPS = 2
+_TABLE_ENV_CLEAR_RENDER_STEPS = 2
 _STREAM_LOOP_RENDER_PERIOD_SEC = 1.0 / 30.0
 _STREAM_LOOP_IDLE_WAIT_SEC = 0.50
 
@@ -246,6 +247,65 @@ class WorkerRuntime:
             self.logger.info("Loaded table environment: %s (object_count=%s)", table_env_id, len(loaded_objects))
             return loaded_objects
 
+    def clear_table_env(self) -> dict[str, Any]:
+        with self.simulation_lock:
+            if self.table_env_id is None:
+                self.logger.info("clear_table_env called with no loaded table environment")
+                return {
+                    "table_env": {
+                        "loaded": False,
+                        "id": None,
+                        "status": "empty",
+                    },
+                    "previous_table_env_id": None,
+                    "object_count": 0,
+                    "objects": [],
+                }
+
+            loaded_table_env_id = self.table_env_id
+            handles_to_clear = list(self.objects)
+            failed_handles: list[object] = []
+            for handle in handles_to_clear:
+                object_id, prim_path = self._describe_table_object_handle(handle)
+                try:
+                    self._remove_table_object_handle(handle)
+                except Exception:
+                    failed_handles.append(handle)
+                    self.logger.exception(
+                        "Failed to remove table environment object: table_env_id=%s object_id=%s prim_path=%s",
+                        loaded_table_env_id,
+                        object_id,
+                        prim_path,
+                    )
+
+            if handles_to_clear:
+                self._step_render_frames(_TABLE_ENV_CLEAR_RENDER_STEPS)
+
+            self.objects = failed_handles
+            if failed_handles:
+                remaining_object_ids = [self._describe_table_object_handle(handle)[0] for handle in failed_handles]
+                raise RuntimeError(
+                    "failed to fully clear table environment "
+                    f"{loaded_table_env_id}; remaining objects: {remaining_object_ids}"
+                )
+
+            self.table_env_id = None
+            self.logger.info(
+                "Cleared table environment: %s (removed_object_count=%s)",
+                loaded_table_env_id,
+                len(handles_to_clear),
+            )
+            return {
+                "table_env": {
+                    "loaded": False,
+                    "id": None,
+                    "status": "cleared",
+                },
+                "previous_table_env_id": loaded_table_env_id,
+                "object_count": 0,
+                "objects": [],
+            }
+
     def build_camera_info_payload(self, camera_id: str) -> dict[str, Any]:
         import numpy as np
 
@@ -340,6 +400,55 @@ class WorkerRuntime:
             return object_name
 
         raise ValueError(f"failed to resolve object id from handle: {handle!r}")
+
+    def get_handle_prim_path(self, handle: object) -> str:
+        prim_path = getattr(handle, "prim_path", None)
+        if callable(prim_path):
+            prim_path = prim_path()
+        if isinstance(prim_path, str) and prim_path:
+            return prim_path
+
+        prim = getattr(handle, "prim", None)
+        if callable(prim):
+            prim = prim()
+        if prim is not None and hasattr(prim, "GetPath"):
+            resolved_path = prim.GetPath()
+            prim_path_text = str(resolved_path)
+            if prim_path_text:
+                return prim_path_text
+
+        raise ValueError(f"failed to resolve prim path from handle: {handle!r}")
+
+    def _describe_table_object_handle(self, handle: object) -> tuple[str, str]:
+        try:
+            object_id = self.get_handle_object_id(handle)
+        except Exception:
+            object_id = "<unknown-object-id>"
+        try:
+            prim_path = self.get_handle_prim_path(handle)
+        except Exception:
+            prim_path = "<unknown-prim-path>"
+        return object_id, prim_path
+
+    def _remove_table_object_handle(self, handle: object) -> None:
+        from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
+
+        object_id = self.get_handle_object_id(handle)
+        prim_path = self.get_handle_prim_path(handle)
+        scene = getattr(self.world, "scene", None)
+        if scene is not None and hasattr(scene, "object_exists") and scene.object_exists(object_id):
+            scene.remove_object(object_id)
+            return
+
+        if is_prim_path_valid(prim_path):
+            delete_prim(prim_path)
+            return
+
+        self.logger.info(
+            "Table environment object is already absent from stage: object_id=%s prim_path=%s",
+            object_id,
+            prim_path,
+        )
 
     def _build_object_transform_payload(self, handle: object) -> dict[str, Any]:
         position_xyz_m, quaternion_wxyz = handle.get_world_pose()

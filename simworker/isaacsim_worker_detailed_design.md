@@ -33,7 +33,7 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 
 这里再补一个边界约定：
 
-- API 层通过 `SimManager` 只使用显式高层方法，例如 `load_table_env("default")`、`get_camera_info("table_top")`、`run_task(task_id=..., objects=..., code=...)`。
+- API 层通过 `SimManager` 只使用显式高层方法，例如 `load_table_env("default")`、`clear_table_env()`、`get_camera_info("table_top")`、`run_task(task_id=..., objects=..., code=...)`。
 - API 层不应直接构造控制协议请求 JSON，也不应自己管理 `request_id`。
 
 当前 `SimManager` 额外提供以下进程生命周期方法，供 API 层直接使用：
@@ -58,7 +58,7 @@ $ISAAC_SIM_ROOT/python.sh /path/to/robot_service/simworker/entrypoint.py \
 - 创建 `session_dir` 与 `control_socket_path`。
 - 通过 Isaac Sim 的 `python.sh` 拉起 `worker`。
 - 用 `hello` 作为 ready probe，确认 `worker` 已经可用。
-- 对 API 层暴露 `hello`、`list_table_env`、`list_api`、`list_camera`、`load_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`run_task`、`shutdown` 等高层方法。
+- 对 API 层暴露 `hello`、`list_table_env`、`list_api`、`list_camera`、`load_table_env`、`clear_table_env`、`get_table_env_objects_info`、`get_robot_status`、`get_camera_info`、`start_camera_stream`、`stop_camera_stream`、`run_task`、`shutdown` 等高层方法。
 - API 层只向这些高层方法传业务参数，`SimManager` 内部负责组装控制协议 JSON。
 - `SimManager` 可以保留启动超时、关闭超时和单次请求超时等外层兜底；如果某次请求在限定时间内一直没有返回，`SimManager` 直接终止当前 `worker` 进程，而不是再额外发送一条 `shutdown` 命令。
 - `SimManager` 只负责控制面，不负责 stream 数据面的读取实现；例如打开 shared memory、读取 `rgb24` 帧、解析 `latest_frame_v1` header、封装 reader SDK 等，都应由 API 层自行处理。
@@ -78,6 +78,9 @@ sim_manager.list_table_env()
 api_text = sim_manager.list_api()
 sim_manager.list_camera()
 sim_manager.load_table_env("default")
+# 如需切换到另一套环境，先 clear 再 load。
+# sim_manager.clear_table_env()
+# sim_manager.load_table_env("ycb")
 camera_info = sim_manager.get_camera_info("table_top")
 stream_info = sim_manager.start_camera_stream("table_top")
 sim_manager.stop_camera_stream(stream_info["stream"]["id"])
@@ -264,6 +267,8 @@ sim_manager.stop_camera_stream(stream_info["stream"]["id"])
   返回当前 `worker` 暴露给任务代码的 robot API 说明文本。
 - `load_table_env`
   按 `table_env_id` 加载一套预定义桌面物体。
+- `clear_table_env`
+  清空当前已经加载的桌面环境物体。
 - `get_table_env_objects_info`
   返回当前桌面环境对象的最新位姿和缩放信息。
 - `get_robot_status`
@@ -800,12 +805,59 @@ session_dir/
 推荐约定：
 
 - 如果 `payload.table_env_id` 不是受支持的值，返回 `ok: false`。
-- 如果已经加载过某套桌面环境，再请求不同的 `table_env_id`，返回 `ok: false`。
+- 如果已经加载过某套桌面环境，再请求不同的 `table_env_id`，返回 `ok: false`；调用方应先执行 `clear_table_env`。
 - 如果重复请求当前已经加载的 `table_env_id`，可以直接返回当前对象状态，按幂等处理。
 - `load_table_env` 不负责初始化固定基础环境；固定基础环境在 `worker` 启动时已经加载完毕。
 - 响应中应回显当前 `table_env.id`、对象 `id` 和对象数量。
 
-#### 7.4 `get_table_env_objects_info`
+#### 7.4 `clear_table_env`
+
+`clear_table_env` 用于清空当前已经加载的桌面环境物体，让同一个 `worker` 后续还能继续加载另一套 `table_env`。这里清理的范围只包括当前 `table_env` 自己创建出来的桌面对象，不包括固定基础环境。
+
+这里同样需要明确边界：
+
+- `clear_table_env` 只删除当前 `table_env` 创建出来的桌面物体。
+- `clear_table_env` 不会删除桌子、机械臂、相机、地面、灯光等固定基础环境元素。
+- `clear_table_env` 不负责停止视频流；当前已启动的视频流仍然可以继续存在。
+- 当前版本默认由调用方保证机器人空闲后再调用，也就是不在 `run_task` 执行过程中调用。
+
+请求示例：
+
+```json
+{
+  "request_id": "req-015",
+  "command_type": "clear_table_env",
+  "payload": {}
+}
+```
+
+成功响应示例：
+
+```json
+{
+  "request_id": "req-015",
+  "ok": true,
+  "payload": {
+    "table_env": {
+      "loaded": false,
+      "id": null,
+      "status": "cleared"
+    },
+    "previous_table_env_id": "ycb",
+    "object_count": 0,
+    "objects": []
+  }
+}
+```
+
+推荐约定：
+
+- 如果当前存在已加载的桌面环境，成功清理后返回 `table_env.loaded = false`、`table_env.id = null`。
+- `previous_table_env_id` 用于回显刚刚被清掉的桌面环境标识。
+- 如果当前本来就没有已加载环境，也返回 `ok: true`，按幂等处理；此时推荐返回 `table_env.status = "empty"`、`previous_table_env_id = null`。
+- 在 `clear_table_env` 成功之后，调用方可以继续执行新的 `load_table_env`。
+
+#### 7.5 `get_table_env_objects_info`
 
 `get_table_env_objects_info` 用于查询当前 `worker` 中已经加载的桌面环境对象变换信息。当前协议只返回 `table_env` 相关物体的最新世界坐标位姿和缩放；如果后续需要，也可以扩展为按对象 `id` 过滤。
 
@@ -864,7 +916,7 @@ session_dir/
 - `get_table_env_objects_info` 的返回值和 `run_task` 的执行输入是两件独立的事。
 - `run_task` 执行时只使用外部传入的 `task.objects` 快照；即使 `worker` 内部场景里存在对象实时状态，也不会自动读取、合并或替换到任务代码看到的 `objects` 中。
 
-#### 7.5 `list_api`
+#### 7.6 `list_api`
 
 `list_api` 用于返回当前 `worker` 对任务代码暴露的 robot API 说明文本。当前实现直接返回 `simworker/robots/api_reference.txt` 的原始文本内容，后续如果新增 robot API，应同步更新这份文件。
 
@@ -897,7 +949,7 @@ session_dir/
 - 上层如果要把 robot API 说明交给 LLM，优先使用这个接口返回的文本，而不是在别处重复维护一份 prompt 片段。
 - 控制协议响应里该字符串位于 `payload.api`；但 `SimManager.list_api()` 对 API 层直接返回这段字符串本身。
 
-#### 7.6 `get_robot_status`
+#### 7.7 `get_robot_status`
 
 `get_robot_status` 用于返回当前机器人是否空闲或忙碌，以及它是否正在执行某个任务。
 
@@ -932,7 +984,7 @@ session_dir/
 
 - `robot.status` 使用 `idle` 和 `busy` 两种状态。
 
-#### 7.7 `list_camera`
+#### 7.8 `list_camera`
 
 `list_camera` 用于返回当前 `worker` 可用的全部相机 `id`，供 API 层先发现可查询的相机，再按需调用 `get_camera_info` 或后续的视频流命令。
 
@@ -972,7 +1024,7 @@ session_dir/
 - `camera_count` 返回当前可用相机数量，便于上层快速校验。
 - `list_camera` 只负责枚举相机，不返回图片、depth 或流信息。
 
-#### 7.8 `get_camera_info`
+#### 7.9 `get_camera_info`
 
 `get_camera_info` 用于获取某个相机的当前快照、内参、位姿和 artifact 引用信息。根据第 3 节约束，控制面只返回引用，不直接携带图片和深度内容本体。
 
@@ -1047,7 +1099,7 @@ session_dir/
   - `table_overview` 使用 `mount_mode = "usd"`，通过 `set_local_pose(..., camera_axes="usd")` 设置本地位姿。
 - 无论 `mount_mode` 是什么，`get_camera_info.pose` 当前都统一返回相机的世界位姿。
 
-#### 7.9 `start_camera_stream`
+#### 7.10 `start_camera_stream`
 
 `start_camera_stream` 用于通知 `worker` 为某个相机启动一条持续更新的内部视频流。根据第 3.2 节约束，这里返回的是内部流引用信息和元数据，而不是对外 `MJPEG` / `WebRTC` 地址。
 
@@ -1112,7 +1164,7 @@ session_dir/
 - 当前 `stream.ref.path` 的实际格式为 `shm://<shared_memory_name>`，供 API 层后续打开共享内存对象使用。
 - `SimManager` 在这里的职责到返回 `stream.ref` 为止，不负责 shared memory 打开、帧读取、像素解码或任何 reader 封装。
 
-#### 7.10 `stop_camera_stream`
+#### 7.11 `stop_camera_stream`
 
 `stop_camera_stream` 用于停止一条已经启动的内部相机流。
 
@@ -1150,7 +1202,7 @@ session_dir/
 - `stream.id` 不存在时，返回 `ok: false`。
 - 停止后，相关内部流资源由 `worker` 负责清理。
 
-#### 7.11 `run_task`
+#### 7.12 `run_task`
 
 `run_task` 用于执行一个任务。按照第 4 节约束，`worker` 在执行任务期间会阻塞控制面直到任务完成或失败，因此这个命令的响应会在任务结束后返回。
 
@@ -1282,7 +1334,7 @@ session_dir/
 - 任务执行期间，控制面阻塞，但已经启动的视频流继续更新。
 - 任务执行期间，不额外提供流控制特例；如果某路流要停止，只能等当前任务返回后由控制面继续处理。
 
-#### 7.12 `shutdown`
+#### 7.13 `shutdown`
 
 `shutdown` 用于关闭当前 `worker`。在阻塞式任务模型下，如果当前正有长任务执行，`shutdown` 只能在该任务返回后被处理。
 

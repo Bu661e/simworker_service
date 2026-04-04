@@ -157,6 +157,9 @@ class SimManager:
             raise ValueError("table_env_id must be a non-empty string")
         return self._call_command("load_table_env", {"table_env_id": table_env_id})
 
+    def clear_table_env(self) -> dict[str, Any]:
+        return self._call_command("clear_table_env", {})
+
     def get_table_env_objects_info(self) -> dict[str, Any]:
         return self._call_command("get_table_env_objects_info", {})
 

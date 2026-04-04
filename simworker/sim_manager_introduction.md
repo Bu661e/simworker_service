@@ -54,6 +54,9 @@ try:
 
     sim_manager.load_table_env("default")
     objects_payload = sim_manager.get_table_env_objects_info()
+    # 如需切换到另一套桌面环境，先 clear 再 load。
+    # sim_manager.clear_table_env()
+    # sim_manager.load_table_env("ycb")
 
     top_camera_info = sim_manager.get_camera_info("table_top")
     stream_payload = sim_manager.start_camera_stream("table_top")
@@ -519,10 +522,43 @@ None
 说明：
 
 - 这个接口只负责加载预设环境，不接收复杂对象 JSON。
-- 一个 worker 生命周期内只允许加载一个 `table_env`。
+- 同一时刻最多只允许存在一套已加载的 `table_env`。
 - 如果当前还没加载环境，请求会真正执行加载。
 - 如果已经加载了同一个 `table_env_id`，会直接返回当前已加载环境。
-- 如果已经加载了另一个 `table_env_id`，会报错，不能在同一个 worker 内切换环境。
+- 如果已经加载了另一个 `table_env_id`，会报错；调用方应先执行 `clear_table_env()`，再加载新的环境。
+
+#### `clear_table_env() -> dict[str, Any]`
+
+用途：
+清空当前已经加载的桌面环境物体，为后续重新加载另一套 `table_env` 做准备。
+
+参数：
+无。
+
+返回值：
+
+```python
+{
+    "table_env": {
+        "loaded": False,
+        "id": None,
+        "status": "cleared",
+    },
+    "previous_table_env_id": "default",
+    "object_count": 0,
+    "objects": [],
+}
+```
+
+调用语义：
+同步。会阻塞到当前桌面环境对象被清空，或返回当前已经为空的状态。
+
+说明：
+
+- 这个接口只清空当前 `table_env` 加载出来的桌面物体。
+- 它不会删除基础环境里的桌子、机械臂、相机、地面、灯光，也不会主动停止已有视频流。
+- 如果当前没有已加载环境，会按幂等方式返回 `table_env.status = "empty"`，同时 `previous_table_env_id = None`。
+- 当前实现默认由调用方保证机器人空闲时再调用，也就是不要在 `run_task()` 执行过程中调用它。
 
 #### `get_table_env_objects_info() -> dict[str, Any]`
 
@@ -790,6 +826,7 @@ def run(robot, objects):
 4. 对于不同HTTP请求，根据需要调用：
     - `list_table_env()` / `list_camera()` / `list_api()`
     - `load_table_env(table_env_id)`
+    - `clear_table_env()`
     - `get_table_env_objects_info()`
     - `get_camera_info(camera_id)` 
     - `start_camera_stream(camera_id)`
@@ -799,7 +836,7 @@ def run(robot, objects):
 
 其中：
 
-- 如果整个外部系统只使用一个 worker，那么 `load_table_env()` 通常在系统启动后的早期阶段就应该完成。
+- 如果整个外部系统只使用一个 worker，那么 `load_table_env()` 通常在系统启动后的早期阶段就应该完成；后续如需切换环境，推荐走 `clear_table_env()` 再 `load_table_env()`。
 - 如果 API 层需要给 LLM 提供对象快照和 robot API 文本，推荐分别使用 `get_table_env_objects_info()` 和 `list_api()`。
 - 如果 API 层需要拍照确认环境是否真的加载成功，推荐在 `load_table_env()` 之后立即调用 `get_camera_info()`。
 

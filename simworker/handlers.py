@@ -23,6 +23,7 @@ class CommandDispatcher:
             "list_api": self._handle_list_api,
             "list_camera": self._handle_list_camera,
             "load_table_env": self._handle_load_table_env,
+            "clear_table_env": self._handle_clear_table_env,
             "get_table_env_objects_info": self._handle_get_table_env_objects_info,
             "get_robot_status": self._handle_get_robot_status,
             "get_camera_info": self._handle_get_camera_info,
@@ -103,6 +104,12 @@ class CommandDispatcher:
                 "objects": [{"id": self._runtime.get_handle_object_id(scene_object)} for scene_object in loaded_objects],
                 "object_count": len(self._runtime.objects),
             },
+        )
+
+    def _handle_clear_table_env(self, request: ControlRequest) -> ControlResponse:
+        return ControlResponse.success(
+            request_id=request.request_id,
+            payload=self._runtime.clear_table_env(),
         )
 
     def _handle_get_table_env_objects_info(self, request: ControlRequest) -> ControlResponse:
