@@ -289,6 +289,7 @@ class WorkerRuntime:
                     f"{loaded_table_env_id}; remaining objects: {remaining_object_ids}"
                 )
 
+            self._reset_world_after_table_env_clear_locked()
             self.table_env_id = None
             self.logger.info(
                 "Cleared table environment: %s (removed_object_count=%s)",
@@ -449,6 +450,14 @@ class WorkerRuntime:
             object_id,
             prim_path,
         )
+
+    def _reset_world_after_table_env_clear_locked(self) -> None:
+        if self.world is None:
+            raise RuntimeError("base environment world is not initialized")
+        # 删除动态刚体会让 Isaac Sim 当前 physics simulation view 失效；
+        # reset 一次 world，确保后续还能在同一 worker 内重新加载新的 table_env。
+        self.world.reset()
+        self._step_render_frames(_TABLE_ENV_CLEAR_RENDER_STEPS)
 
     def _build_object_transform_payload(self, handle: object) -> dict[str, Any]:
         position_xyz_m, quaternion_wxyz = handle.get_world_pose()
