@@ -419,6 +419,7 @@ export function CameraStream() {
 - 返回当前服务支持的所有 `table_env_id`
 - 该接口直接映射 `SimManager.list_table_env()`
 - 当前不额外返回 `display_name`、预览图或其他展示层字段
+- 当前内置环境包括 `default`、`multi_geometry` 和 `ycb`
 
 成功响应：
 
@@ -434,10 +435,13 @@ export function CameraStream() {
       "id": "default"
     },
     {
+      "id": "multi_geometry"
+    },
+    {
       "id": "ycb"
     }
   ],
-  "table_env_count": 2
+  "table_env_count": 3
 }
 ```
 
@@ -462,6 +466,8 @@ export function CameraStream() {
 - 该接口直接映射 `SimManager.load_table_env(table_env_id)`
 - API 层不再自己维护“清空场景后再加载”的逻辑
 - 同一时刻最多只允许存在一套已加载的 `table_env`
+- 当前内置环境 ID 以 `GET /table-envs` 返回结果为准；当前实现包括 `default`、`multi_geometry` 和 `ycb`
+- `multi_geometry` 当前包含 8 个对象，其中有 2 个固定分类圆盘 `left_plate` / `right_plate`
 
 URL 示例：
 
@@ -592,7 +598,12 @@ PUT /table-env/current/default
         "position_xyz_m": [0.2, 0.0, 1.55],
         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
       },
-      "scale_xyz": [0.06, 0.06, 0.06]
+      "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+      "geometry": {
+        "type": "cuboid",
+        "size_xyz_m": [0.06, 0.06, 0.06]
+      },
+      "color": [1.0, 0.0, 0.0]
     },
     {
       "id": "blue_cube",
@@ -600,7 +611,82 @@ PUT /table-env/current/default
         "position_xyz_m": [0.3, 0.0, 1.55],
         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
       },
-      "scale_xyz": [0.06, 0.06, 0.06]
+      "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+      "geometry": {
+        "type": "cuboid",
+        "size_xyz_m": [0.06, 0.06, 0.06]
+      },
+      "color": [0.0, 0.0, 1.0]
+    }
+  ]
+}
+```
+
+例如，在 `multi_geometry` 环境下，返回体里的 `objects` 可以节选成下面这样
+（下面只保留盘子、立方体、长方体、圆柱体 4 类代表对象；真实返回时 `object_count` 仍为 `8`）：
+
+```json
+{
+  "ok": true,
+  "table_env": {
+    "loaded": true,
+    "id": "multi_geometry"
+  },
+  "object_count": 8,
+  "objects": [
+    {
+      "id": "left_plate",
+      "pose": {
+        "position_xyz_m": [-0.34, 0.01, 1.5075],
+        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+      "geometry": {
+        "type": "cylinder",
+        "radius_m": 0.09,
+        "height_m": 0.015
+      },
+      "color": [0.15, 0.75, 0.85]
+    },
+    {
+      "id": "red_cube",
+      "pose": {
+        "position_xyz_m": [-0.14, 0.12, 1.57],
+        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+      "geometry": {
+        "type": "cuboid",
+        "size_xyz_m": [0.08, 0.08, 0.08]
+      },
+      "color": [1.0, 0.0, 0.0]
+    },
+    {
+      "id": "green_block",
+      "pose": {
+        "position_xyz_m": [0.14, 0.12, 1.56],
+        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+      "geometry": {
+        "type": "cuboid",
+        "size_xyz_m": [0.12, 0.08, 0.06]
+      },
+      "color": [0.0, 1.0, 0.0]
+    },
+    {
+      "id": "purple_cylinder",
+      "pose": {
+        "position_xyz_m": [0.0, -0.1, 1.575],
+        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "bbox_size_xyz_m": [0.08, 0.08, 0.09],
+      "geometry": {
+        "type": "cylinder",
+        "radius_m": 0.04,
+        "height_m": 0.09
+      },
+      "color": [0.6, 0.0, 0.8]
     }
   ]
 }
@@ -610,7 +696,14 @@ PUT /table-env/current/default
 
 - `pose.position_xyz_m`：物体 world 坐标系下的位置
 - `pose.quaternion_wxyz`：物体 world 坐标系下的朝向
-- `scale_xyz`：物体 world scale
+- `bbox_size_xyz_m`：物体局部坐标系下的包围盒尺寸
+- `geometry`：物体几何描述；规则几何体会返回对应参数，不规则物体可返回 `type = "mesh"`
+- `color`：对象颜色，当前约定为 RGB 三元组；如果没有稳定的单一颜色，也可以返回 `null`
+- 当前基础场景按机器人视角约定 `front = +y`、`back = -y`、`left = -x`、`right = +x`、`up = +z`
+- 对 `multi_geometry` 而言，`left_plate` 位于 `x < 0`，`right_plate` 位于 `x > 0`
+- `multi_geometry` 的 `objects` 当前会返回 8 个对象，包含这两个固定分类圆盘；如果前端或任务代码只关心可抓取物体，需要自行过滤
+- `bbox_size_xyz_m` 是统一尺寸描述字段；前端或上层逻辑可以优先基于它做尺寸展示或粗粒度规划
+- 如果需要更精确的形状参数，例如圆柱体半径和高度，应从 `geometry` 里读取
 
 失败响应体示例：
 
@@ -722,7 +815,12 @@ PUT /table-env/current/default
           "position_xyz_m": [0.2, 0.0, 1.55],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "scale_xyz": [0.06, 0.06, 0.06]
+        "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+        "geometry": {
+          "type": "cuboid",
+          "size_xyz_m": [0.06, 0.06, 0.06]
+        },
+        "color": [1.0, 0.0, 0.0]
       },
       {
         "id": "blue_cube",
@@ -730,10 +828,15 @@ PUT /table-env/current/default
           "position_xyz_m": [0.3, 0.0, 1.55],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "scale_xyz": [0.06, 0.06, 0.06]
+        "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+        "geometry": {
+          "type": "cuboid",
+          "size_xyz_m": [0.06, 0.06, 0.06]
+        },
+        "color": [0.0, 0.0, 1.0]
       }
     ],
-    "code": "def run(robot, objects):\n    red_cube = next(obj for obj in objects if obj[\"id\"] == \"red_cube\")\n    blue_cube = next(obj for obj in objects if obj[\"id\"] == \"blue_cube\")\n    target_center_z = (\n        blue_cube[\"pose\"][\"position_xyz_m\"][2]\n        + (blue_cube[\"scale_xyz\"][2] / 2)\n        + (red_cube[\"scale_xyz\"][2] / 2)\n        + 0.03\n    )\n\n    robot.pick_and_place(\n        pick_position=red_cube[\"pose\"][\"position_xyz_m\"],\n        place_position=[\n            blue_cube[\"pose\"][\"position_xyz_m\"][0],\n            blue_cube[\"pose\"][\"position_xyz_m\"][1],\n            target_center_z,\n        ],\n        rotation=None,\n        grasp_offset=None,\n    )\n"
+    "code": "def run(robot, objects):\n    red_cube = next(obj for obj in objects if obj[\"id\"] == \"red_cube\")\n    blue_cube = next(obj for obj in objects if obj[\"id\"] == \"blue_cube\")\n    target_center_z = (\n        blue_cube[\"pose\"][\"position_xyz_m\"][2]\n        + (blue_cube[\"bbox_size_xyz_m\"][2] / 2)\n        + (red_cube[\"bbox_size_xyz_m\"][2] / 2)\n        + 0.03\n    )\n\n    robot.pick_and_place(\n        pick_position=red_cube[\"pose\"][\"position_xyz_m\"],\n        place_position=[\n            blue_cube[\"pose\"][\"position_xyz_m\"][0],\n            blue_cube[\"pose\"][\"position_xyz_m\"][1],\n            target_center_z,\n        ],\n        rotation=None,\n        grasp_offset=None,\n    )\n"
   }
 }
 ```

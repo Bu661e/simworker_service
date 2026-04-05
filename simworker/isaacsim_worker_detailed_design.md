@@ -80,6 +80,7 @@ sim_manager.list_camera()
 sim_manager.load_table_env("default")
 # 如需切换到另一套环境，先 clear 再 load。
 # sim_manager.clear_table_env()
+# sim_manager.load_table_env("multi_geometry")
 # sim_manager.load_table_env("ycb")
 camera_info = sim_manager.get_camera_info("table_top")
 stream_info = sim_manager.start_camera_stream("table_top")
@@ -727,10 +728,13 @@ session_dir/
         "id": "default"
       },
       {
+        "id": "multi_geometry"
+      },
+      {
         "id": "ycb"
       }
     ],
-    "table_env_count": 2
+    "table_env_count": 3
   }
 }
 ```
@@ -748,7 +752,7 @@ session_dir/
 这里需要明确边界：
 
 - `worker` 启动时已经加载固定基础环境。
-- `worker` 自己维护一组硬编码的桌面环境模板，当前版本暂时只有 `default` 和 `ycb` 两套。
+- `worker` 自己维护一组硬编码的桌面环境模板，当前版本内置 `default`、`multi_geometry` 和 `ycb` 三套。
 - 控制面不再发送复杂对象 JSON，只发送一个简单的 `table_env_id`。
 - 旧的 `add_objects` / `add_scene_objects` 控制命令视为已移除，不再作为新协议的一部分继续维护。
 
@@ -756,8 +760,16 @@ session_dir/
 
 - `default`
   由两个动态方块组成，适合最小联调和基础抓取验证。
+- `multi_geometry`
+  当前版本包含 8 个对象：2 个固定分类圆盘 `left_plate` / `right_plate`，以及 4 个长方体/立方体和 2 个圆柱体；适合简单几何体抓取、多目标识别和基础摆放联调。
 - `ycb`
   由硬编码 YCB 物体组成，当前优先使用 `/root/Download/YCB/Axis_Aligned_Physics/` 下的可抓取资产；如主机仍保留旧目录，也兼容 `/root/Downloads/YCB/Axis_Aligned_Physics/`。
+
+当前默认基础场景采用如下方向约定：
+
+- 机器人底座位于桌子后侧，朝向桌面中心；在 world 坐标系下，可按 `front = +y`、`back = -y` 理解。
+- 在同一坐标系下，`left = -x`、`right = +x`、`up = +z`。
+- 对 `multi_geometry` 环境而言，`left_plate` 固定放在 `x < 0` 一侧，`right_plate` 固定放在 `x > 0` 一侧。
 
 对于 `ycb` 环境，当前阶段固定遵守以下约束：
 
@@ -892,7 +904,13 @@ session_dir/
           "position_xyz_m": [0.201, 0.179, 1.551],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "scale_xyz": [1.0, 1.0, 1.0]
+        "bbox_size_xyz_m": [0.16, 0.06, 0.21],
+        "geometry": {
+          "type": "mesh",
+          "asset_filename": "003_cracker_box.usd",
+          "semantic_label": "cracker_box"
+        },
+        "color": null
       },
       {
         "id": "mustard_bottle_1",
@@ -900,7 +918,86 @@ session_dir/
           "position_xyz_m": [0.319, 0.181, 1.551],
           "quaternion_wxyz": [0.9998, 0.0, 0.0, 0.0175]
         },
-        "scale_xyz": [1.0, 1.0, 1.0]
+        "bbox_size_xyz_m": [0.08, 0.08, 0.19],
+        "geometry": {
+          "type": "mesh",
+          "asset_filename": "006_mustard_bottle.usd",
+          "semantic_label": "mustard_bottle"
+        },
+        "color": null
+      }
+    ]
+  }
+}
+```
+
+例如，在 `multi_geometry` 环境下，`payload.objects` 中不同类型对象的条目可以是下面这样
+（下面只节选盘子、立方体、长方体、圆柱体 4 类代表对象；完整返回时 `object_count` 仍为 `8`）：
+
+```json
+{
+  "request_id": "req-020",
+  "ok": true,
+  "payload": {
+    "table_env": {
+      "loaded": true,
+      "id": "multi_geometry"
+    },
+    "object_count": 8,
+    "objects": [
+      {
+        "id": "left_plate",
+        "pose": {
+          "position_xyz_m": [-0.34, 0.01, 1.5075],
+          "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+        },
+        "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+        "geometry": {
+          "type": "cylinder",
+          "radius_m": 0.09,
+          "height_m": 0.015
+        },
+        "color": [0.15, 0.75, 0.85]
+      },
+      {
+        "id": "red_cube",
+        "pose": {
+          "position_xyz_m": [-0.14, 0.12, 1.57],
+          "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+        },
+        "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+        "geometry": {
+          "type": "cuboid",
+          "size_xyz_m": [0.08, 0.08, 0.08]
+        },
+        "color": [1.0, 0.0, 0.0]
+      },
+      {
+        "id": "green_block",
+        "pose": {
+          "position_xyz_m": [0.14, 0.12, 1.56],
+          "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+        },
+        "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+        "geometry": {
+          "type": "cuboid",
+          "size_xyz_m": [0.12, 0.08, 0.06]
+        },
+        "color": [0.0, 1.0, 0.0]
+      },
+      {
+        "id": "purple_cylinder",
+        "pose": {
+          "position_xyz_m": [0.0, -0.1, 1.575],
+          "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+        },
+        "bbox_size_xyz_m": [0.08, 0.08, 0.09],
+        "geometry": {
+          "type": "cylinder",
+          "radius_m": 0.04,
+          "height_m": 0.09
+        },
+        "color": [0.6, 0.0, 0.8]
       }
     ]
   }
@@ -913,6 +1010,11 @@ session_dir/
 
 - 对 `physics.mode = "dynamic"` 的 `usd_asset`，返回的 `pose` 应理解为“当前世界位姿”，而不是最初请求里的生成位姿。
 - 这对可抓取 YCB 物体尤其重要：物体在落桌、碰撞稳定后，`pose` 可能与请求中的初始值略有偏差；如果上层是基于 simworker 当前场景做抓取规划，应优先使用这里返回的最新位姿。
+- `multi_geometry` 环境中的 `objects` 当前会返回 8 个对象，其中包括 2 个固定分类圆盘 `left_plate` / `right_plate`。
+- 如果上层只关心可抓取的小几何体，应自行按 `id` 过滤掉这两个分类圆盘。
+- `bbox_size_xyz_m` 表示对象局部坐标系下的包围盒尺寸，是统一的尺寸描述字段。
+- `geometry` 用于补充对象几何参数；规则几何体可直接返回尺寸或半径/高度，不规则物体可返回 `type = "mesh"` 和相关资产标识。
+- `color` 当前约定为 RGB 三元组；如果对象没有稳定的单一颜色语义，也可以返回 `null`。
 - `get_table_env_objects_info` 的返回值和 `run_task` 的执行输入是两件独立的事。
 - `run_task` 执行时只使用外部传入的 `task.objects` 快照；即使 `worker` 内部场景里存在对象实时状态，也不会自动读取、合并或替换到任务代码看到的 `objects` 中。
 
@@ -1251,11 +1353,20 @@ session_dir/
               1.5434716837958717e-09
             ]
           },
-          "scale_xyz": [
+          "bbox_size_xyz_m": [
             0.07999999821186066,
             0.07999999821186066,
             0.07999999821186066
-          ]
+          ],
+          "geometry": {
+            "type": "cuboid",
+            "size_xyz_m": [
+              0.07999999821186066,
+              0.07999999821186066,
+              0.07999999821186066
+            ]
+          },
+          "color": [0.62, 0.06, 0.06]
         },
         {
           "id": "blue_cube",
@@ -1272,14 +1383,23 @@ session_dir/
               9.343960272190088e-08
             ]
           },
-          "scale_xyz": [
+          "bbox_size_xyz_m": [
             0.07999999821186066,
             0.07999999821186066,
             0.07999999821186066
-          ]
+          ],
+          "geometry": {
+            "type": "cuboid",
+            "size_xyz_m": [
+              0.07999999821186066,
+              0.07999999821186066,
+              0.07999999821186066
+            ]
+          },
+          "color": [0.08, 0.24, 0.62]
         }
       ],
-      "code": "def run(robot, objects):\\n    red_cube = next(obj for obj in objects if obj['id'] == 'red_cube')\\n    blue_cube = next(obj for obj in objects if obj['id'] == 'blue_cube')\\n    target_center_z = (\\n        blue_cube['pose']['position_xyz_m'][2]\\n        + (blue_cube['scale_xyz'][2] / 2)\\n        + (red_cube['scale_xyz'][2] / 2)\\n        + 0.03\\n    )\\n\\n    robot.pick_and_place(\\n        pick_position=red_cube['pose']['position_xyz_m'],\\n        place_position=[\\n            blue_cube['pose']['position_xyz_m'][0],\\n            blue_cube['pose']['position_xyz_m'][1],\\n            target_center_z,\\n        ],\\n        rotation=None,\\n        grasp_offset=None,\\n    )\\n"
+      "code": "def run(robot, objects):\\n    red_cube = next(obj for obj in objects if obj['id'] == 'red_cube')\\n    blue_cube = next(obj for obj in objects if obj['id'] == 'blue_cube')\\n    target_center_z = (\\n        blue_cube['pose']['position_xyz_m'][2]\\n        + (blue_cube['bbox_size_xyz_m'][2] / 2)\\n        + (red_cube['bbox_size_xyz_m'][2] / 2)\\n        + 0.03\\n    )\\n\\n    robot.pick_and_place(\\n        pick_position=red_cube['pose']['position_xyz_m'],\\n        place_position=[\\n            blue_cube['pose']['position_xyz_m'][0],\\n            blue_cube['pose']['position_xyz_m'][1],\\n            target_center_z,\\n        ],\\n        rotation=None,\\n        grasp_offset=None,\\n    )\\n"
     }
   }
 }

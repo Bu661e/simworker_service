@@ -10,6 +10,7 @@ __pycache__/
 simworker/.pytest_tmp/
 simworker/.pytest_tmp_cases/
 simworker/pytest_runs/
+simworker/test_runs/
 .pytest_tmp/
 .ipynb_checkpoints/
 .pytest_tmp*/
@@ -17,6 +18,9 @@ simworker/pytest_runs/
 # 本地产生的覆盖率与测试产物
 .coverage
 htmlcov/
+test_runs/
 
 # 编辑器与系统文件
 .DS_Store
+
+simworker/runs/

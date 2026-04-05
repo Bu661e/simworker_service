@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
@@ -32,8 +33,10 @@ class WorkerRuntime:
     robot_status: str = "idle"
     current_task_id: str | None = None
     table_env_id: str | None = None
-    # 这里直接保存 table_env 创建出的 handle；位姿和缩放统一在查询时直接从 handle 现查。
+    # 这里直接保存 table_env 创建出的 handle；位姿在查询时从 handle 现查，
+    # bbox / geometry / color 之类的对象元数据单独保存在 object_metadata_by_id。
     objects: list[object] = field(default_factory=list)
+    object_metadata_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_counters: dict[str, int] = field(default_factory=dict)
     stream_counters: dict[str, int] = field(default_factory=dict)
     streams_by_id: dict[str, CameraStreamRuntimeState] = field(default_factory=dict)
@@ -123,6 +126,27 @@ class WorkerRuntime:
                 "object_count": len(self.objects),
                 "objects": [self._build_object_transform_payload(scene_object) for scene_object in self.objects],
             }
+
+    def register_table_object_metadata(
+        self,
+        object_id: str,
+        *,
+        bbox_size_xyz_m: Sequence[float] | None = None,
+        geometry: dict[str, Any] | None = None,
+        color: Sequence[float] | None = None,
+    ) -> None:
+        if not isinstance(object_id, str) or not object_id:
+            raise ValueError("object_id must be a non-empty string")
+
+        metadata: dict[str, Any] = {}
+        if bbox_size_xyz_m is not None:
+            metadata["bbox_size_xyz_m"] = _normalize_vector3(bbox_size_xyz_m, field_name="bbox_size_xyz_m")
+        if geometry is not None:
+            if not isinstance(geometry, dict):
+                raise ValueError("geometry must be an object")
+            metadata["geometry"] = copy.deepcopy(geometry)
+        metadata["color"] = None if color is None else _normalize_vector3(color, field_name="color")
+        self.object_metadata_by_id[object_id] = metadata
 
     def build_list_camera_payload(self) -> dict[str, Any]:
         # 控制面只需要先知道有哪些 camera.id 可用，具体详情再走 get_camera_info。
@@ -240,7 +264,12 @@ class WorkerRuntime:
                     f"table_env_id {table_env_id} does not match current loaded table_env_id {self.table_env_id}"
                 )
 
-            loaded_objects = load_table_environment(self, table_env_id)
+            self.object_metadata_by_id = {}
+            try:
+                loaded_objects = load_table_environment(self, table_env_id)
+            except Exception:
+                self.object_metadata_by_id = {}
+                raise
             self._ensure_unique_handle_object_ids(loaded_objects)
             self.objects = list(loaded_objects)
             self.table_env_id = table_env_id
@@ -282,6 +311,12 @@ class WorkerRuntime:
                 self._step_render_frames(_TABLE_ENV_CLEAR_RENDER_STEPS)
 
             self.objects = failed_handles
+            failed_object_ids = {self._describe_table_object_handle(handle)[0] for handle in failed_handles}
+            self.object_metadata_by_id = {
+                object_id: metadata
+                for object_id, metadata in self.object_metadata_by_id.items()
+                if object_id in failed_object_ids
+            }
             if failed_handles:
                 remaining_object_ids = [self._describe_table_object_handle(handle)[0] for handle in failed_handles]
                 raise RuntimeError(
@@ -291,6 +326,7 @@ class WorkerRuntime:
 
             self._reset_world_after_table_env_clear_locked()
             self.table_env_id = None
+            self.object_metadata_by_id = {}
             self.logger.info(
                 "Cleared table environment: %s (removed_object_count=%s)",
                 loaded_table_env_id,
@@ -460,10 +496,11 @@ class WorkerRuntime:
         self._step_render_frames(_TABLE_ENV_CLEAR_RENDER_STEPS)
 
     def _build_object_transform_payload(self, handle: object) -> dict[str, Any]:
+        object_id = self.get_handle_object_id(handle)
         position_xyz_m, quaternion_wxyz = handle.get_world_pose()
-        scale_xyz = handle.get_world_scale()
+        metadata = self._get_table_object_metadata(handle)
         return {
-            "id": self.get_handle_object_id(handle),
+            "id": object_id,
             "pose": {
                 "position_xyz_m": [float(position_xyz_m[0]), float(position_xyz_m[1]), float(position_xyz_m[2])],
                 "quaternion_wxyz": [
@@ -473,8 +510,39 @@ class WorkerRuntime:
                     float(quaternion_wxyz[3]),
                 ],
             },
-            "scale_xyz": [float(scale_xyz[0]), float(scale_xyz[1]), float(scale_xyz[2])],
+            "bbox_size_xyz_m": metadata["bbox_size_xyz_m"],
+            "geometry": metadata["geometry"],
+            "color": metadata["color"],
         }
+
+    def _get_table_object_metadata(self, handle: object) -> dict[str, Any]:
+        object_id = self.get_handle_object_id(handle)
+        metadata = copy.deepcopy(self.object_metadata_by_id.get(object_id, {}))
+        if "bbox_size_xyz_m" not in metadata:
+            metadata["bbox_size_xyz_m"] = self._compute_handle_local_bbox_size_xyz_m(handle)
+            self.object_metadata_by_id[object_id] = copy.deepcopy(metadata)
+        if "geometry" not in metadata:
+            metadata["geometry"] = {"type": "unknown"}
+        metadata.setdefault("color", None)
+        return metadata
+
+    def _compute_handle_local_bbox_size_xyz_m(self, handle: object) -> list[float]:
+        from isaacsim.core.utils.prims import get_prim_at_path
+        from pxr import Usd, UsdGeom
+
+        prim_path = self.get_handle_prim_path(handle)
+        prim = get_prim_at_path(prim_path)
+        if prim is None or not prim.IsValid():
+            raise RuntimeError(f"failed to resolve prim for bbox query: {prim_path}")
+
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+            useExtentsHint=True,
+        )
+        bbox = bbox_cache.ComputeLocalBound(prim)
+        size = bbox.GetRange().GetSize()
+        return [float(size[0]), float(size[1]), float(size[2])]
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
@@ -729,6 +797,12 @@ def _configure_logger(log_path: Path) -> logging.Logger:
     logger.addHandler(stream_handler)
 
     return logger
+
+
+def _normalize_vector3(values: Sequence[float], *, field_name: str) -> list[float]:
+    if len(values) != 3:
+        raise ValueError(f"{field_name} must contain exactly 3 values")
+    return [float(values[0]), float(values[1]), float(values[2])]
 
 
 def _utc_now_isoformat() -> str:

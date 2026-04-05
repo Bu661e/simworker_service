@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from simworker.table_environments.default import load_default_table_environment
+from simworker.table_environments.multi_geometry import load_multi_geometry_table_environment
 from simworker.table_environments.ycb import load_ycb_table_environment
 
 if TYPE_CHECKING:
@@ -11,6 +12,7 @@ if TYPE_CHECKING:
 
 _TABLE_ENV_BUILDERS: dict[str, Callable[[WorkerRuntime], list[object]]] = {
     "default": load_default_table_environment,
+    "multi_geometry": load_multi_geometry_table_environment,
     "ycb": load_ycb_table_environment,
 }
 

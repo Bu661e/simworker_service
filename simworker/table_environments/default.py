@@ -13,7 +13,7 @@ _DEFAULT_CUBES = (
         "prim_path": "/World/Tabletop/red_cube",
         "position_xyz_m": (0.16, 0.22, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.08, 0.08, 0.08),
+        "size_xyz_m": (0.04, 0.04, 0.04),
         "color_rgb": (0.62, 0.06, 0.06),
     },
     {
@@ -21,7 +21,7 @@ _DEFAULT_CUBES = (
         "prim_path": "/World/Tabletop/blue_cube",
         "position_xyz_m": (0.32, -0.14, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.08, 0.08, 0.08),
+        "size_xyz_m": (0.04, 0.04, 0.04),
         "color_rgb": (0.08, 0.24, 0.62),
     },
 )
@@ -62,6 +62,15 @@ def load_default_table_environment(runtime: WorkerRuntime) -> list[object]:
                     degrees=True,
                     extrinsic=False,
                 ),
+            )
+            runtime.register_table_object_metadata(
+                cube["object_id"],
+                bbox_size_xyz_m=cube["size_xyz_m"],
+                geometry={
+                    "type": "cuboid",
+                    "size_xyz_m": [float(cube["size_xyz_m"][0]), float(cube["size_xyz_m"][1]), float(cube["size_xyz_m"][2])],
+                },
+                color=cube["color_rgb"],
             )
             loaded_handles.append(handle)
 

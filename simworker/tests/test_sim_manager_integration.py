@@ -35,14 +35,14 @@ class SimManagerTraceHarness:
 
 
 @pytest.fixture
-def sim_manager_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimManagerTraceHarness]:
+def sim_manager_harness(case_output_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimManagerTraceHarness]:
     if os.environ.get(_ENABLE_REAL_TEST_ENV) != "1":
         pytest.skip(
             "该测试会真实启动 Isaac Sim worker。"
             f"如需运行，请设置 {_ENABLE_REAL_TEST_ENV}=1。"
         )
 
-    uds_trace_path = tmp_path / "sim_manager_uds_trace.json"
+    uds_trace_path = case_output_dir / "sim_manager_uds_trace.json"
     uds_messages: list[dict[str, object]] = []
 
     def _flush_uds_trace() -> None:
@@ -82,8 +82,8 @@ def sim_manager_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
     monkeypatch.setattr(sim_manager_module, "recv_json_message", _traced_recv_json_message)
 
     manager = SimManager(
-        session_dir=tmp_path / "session",
-        control_socket_path=tmp_path / "control.sock",
+        session_dir=case_output_dir / "session",
+        control_socket_path=case_output_dir / "control.sock",
         python_bin=_worker_python(),
     )
     try:
@@ -113,8 +113,8 @@ def test_sim_manager_default_env_exercises_all_interfaces(
     assert sim_manager.is_running() is True
 
     list_table_env_payload = sim_manager.list_table_env()
-    assert {item["id"] for item in list_table_env_payload["table_envs"]} == {"default", "ycb"}
-    assert list_table_env_payload["table_env_count"] == 2
+    assert {item["id"] for item in list_table_env_payload["table_envs"]} == {"default", "multi_geometry", "ycb"}
+    assert list_table_env_payload["table_env_count"] == 3
 
     api_text = sim_manager.list_api()
     assert api_text == get_robot_api_text()
@@ -203,8 +203,8 @@ def test_sim_manager_default_env_exercises_all_interfaces(
             blue_cube = next(obj for obj in objects if obj["id"] == "blue_cube")
             target_center_z = (
                 blue_cube["pose"]["position_xyz_m"][2]
-                + (blue_cube["scale_xyz"][2] / 2)
-                + (red_cube["scale_xyz"][2] / 2)
+                + (blue_cube["bbox_size_xyz_m"][2] / 2)
+                + (red_cube["bbox_size_xyz_m"][2] / 2)
                 + 0.03
             )
 

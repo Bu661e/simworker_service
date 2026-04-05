@@ -123,10 +123,19 @@ def _assert_object_transform_payload(object_payload: dict[str, Any]) -> None:
     assert all(isinstance(value, float) for value in pose["position_xyz_m"])
     assert all(isinstance(value, float) for value in pose["quaternion_wxyz"])
 
-    scale_xyz = object_payload["scale_xyz"]
-    assert len(scale_xyz) == 3
-    assert all(isinstance(value, float) for value in scale_xyz)
-    assert all(value > 0.0 for value in scale_xyz)
+    bbox_size_xyz_m = object_payload["bbox_size_xyz_m"]
+    assert len(bbox_size_xyz_m) == 3
+    assert all(isinstance(value, float) for value in bbox_size_xyz_m)
+    assert all(value > 0.0 for value in bbox_size_xyz_m)
+
+    geometry = object_payload["geometry"]
+    assert isinstance(geometry, dict)
+    assert isinstance(geometry["type"], str) and geometry["type"]
+
+    color = object_payload["color"]
+    if color is not None:
+        assert len(color) == 3
+        assert all(isinstance(value, float) for value in color)
 
 
 def _stream_ref_name(stream_ref_path: str) -> str:
@@ -189,7 +198,7 @@ def _save_stream_frame_png(
     from PIL import Image
 
     image_array = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3))
-    Image.fromarray(image_array, mode="RGB").save(output_path)
+    Image.fromarray(image_array).save(output_path)
 
 
 def _find_existing_ycb_asset_root() -> Path | None:
@@ -230,16 +239,16 @@ def _shutdown_worker(handle: WorkerProcessHandle) -> None:
 
 
 @pytest.fixture
-def simworker_process(tmp_path: Path) -> WorkerProcessHandle:
+def simworker_process(case_output_dir: Path) -> WorkerProcessHandle:
     if os.environ.get(_ENABLE_REAL_TEST_ENV) != "1":
         pytest.skip(
             "该测试会真实启动 Isaac Sim worker。"
             f"如需运行，请设置 {_ENABLE_REAL_TEST_ENV}=1。"
         )
 
-    session_dir = tmp_path / "session"
-    socket_path = tmp_path / "control.sock"
-    log_path = tmp_path / "simworker.log"
+    session_dir = case_output_dir / "session"
+    socket_path = case_output_dir / "control.sock"
+    log_path = case_output_dir / "simworker.log"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     log_handle = log_path.open("w", encoding="utf-8")
@@ -363,8 +372,8 @@ def _assert_simple_interface_sequence(
     )
     assert list_env_response["ok"] is True
     returned_env_ids = {item["id"] for item in list_env_response["payload"]["table_envs"]}
-    assert returned_env_ids == {"default", "ycb"}
-    assert list_env_response["payload"]["table_env_count"] == 2
+    assert returned_env_ids == {"default", "multi_geometry", "ycb"}
+    assert list_env_response["payload"]["table_env_count"] == 3
 
     list_api_payload = _assert_success(
         _send_request(
@@ -738,6 +747,26 @@ def test_simworker_ycb_env_simple_interfaces_and_two_camera_snapshots(
     )
 
 
+def test_simworker_multi_geometry_env_simple_interfaces_and_two_camera_snapshots(
+    simworker_process: WorkerProcessHandle,
+) -> None:
+    _assert_simple_interface_sequence(
+        simworker_process,
+        table_env_id="multi_geometry",
+        expected_object_ids={
+            "left_plate",
+            "right_plate",
+            "red_cube",
+            "blue_cube",
+            "green_block",
+            "yellow_block",
+            "purple_cylinder",
+            "orange_cylinder",
+        },
+        save_objects_info_json=True,
+    )
+
+
 def test_simworker_default_env_two_camera_snapshots_and_dual_streams(
     simworker_process: WorkerProcessHandle,
 ) -> None:
@@ -994,8 +1023,8 @@ def test_simworker_default_env_run_task_keeps_dual_streams_publishing(
             blue_cube = next(obj for obj in objects if obj["id"] == "blue_cube")
             target_center_z = (
                 blue_cube["pose"]["position_xyz_m"][2]
-                + (blue_cube["scale_xyz"][2] / 2)
-                + (red_cube["scale_xyz"][2] / 2)
+                + (blue_cube["bbox_size_xyz_m"][2] / 2)
+                + (red_cube["bbox_size_xyz_m"][2] / 2)
                 + 0.03
             )
 

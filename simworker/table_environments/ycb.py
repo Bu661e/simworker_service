@@ -25,7 +25,7 @@ _YCB_OBJECTS = (
         "asset_filename": "003_cracker_box.usd",
         "position_xyz_m": (0.20, 0.18, 1.68),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "scale_xyz": (1.0, 1.0, 1.0),
+        "asset_scale": (1.0, 1.0, 1.0),
         "semantic_label": "cracker_box",
     },
     {
@@ -34,7 +34,7 @@ _YCB_OBJECTS = (
         "asset_filename": "006_mustard_bottle.usd",
         "position_xyz_m": (0.34, -0.10, 1.68),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "scale_xyz": (1.0, 1.0, 1.0),
+        "asset_scale": (1.0, 1.0, 1.0),
         "semantic_label": "mustard_bottle",
     },
 )
@@ -68,7 +68,7 @@ def load_ycb_table_environment(runtime: WorkerRuntime) -> list[object]:
                 name=scene_object["object_id"],
                 position=scene_object["position_xyz_m"],
                 orientation=euler_xyz_deg_to_quaternion_wxyz(scene_object["rotation_rpy_deg"]),
-                scale=scene_object["scale_xyz"],
+                scale=scene_object["asset_scale"],
             )
             add_labels(
                 get_prim_at_path(scene_object["prim_path"]),
@@ -78,6 +78,15 @@ def load_ycb_table_environment(runtime: WorkerRuntime) -> list[object]:
             _apply_usd_asset_dynamic_physics(
                 root_prim,
                 disable_gravity=False,
+            )
+            runtime.register_table_object_metadata(
+                scene_object["object_id"],
+                geometry={
+                    "type": "mesh",
+                    "asset_filename": scene_object["asset_filename"],
+                    "semantic_label": scene_object["semantic_label"],
+                },
+                color=None,
             )
             loaded_handles.append(handle)
 

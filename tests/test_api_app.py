@@ -121,8 +121,8 @@ class FakeSimManager:
         self._maybe_raise("list_table_env")
         self.calls.append(("list_table_env", (), {}))
         return {
-            "table_envs": [{"id": "default"}, {"id": "ycb"}],
-            "table_env_count": 2,
+            "table_envs": [{"id": "default"}, {"id": "multi_geometry"}, {"id": "ycb"}],
+            "table_env_count": 3,
         }
 
     def load_table_env(self, table_env_id: str) -> dict[str, Any]:
@@ -244,7 +244,12 @@ class FakeSimManager:
                         "position_xyz_m": [0.2, 0.0, 1.55],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "scale_xyz": [0.06, 0.06, 0.06],
+                    "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.06, 0.06, 0.06],
+                    },
+                    "color": [1.0, 0.0, 0.0],
                 },
                 {
                     "id": "blue_cube",
@@ -252,7 +257,12 @@ class FakeSimManager:
                         "position_xyz_m": [0.3, 0.0, 1.55],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "scale_xyz": [0.06, 0.06, 0.06],
+                    "bbox_size_xyz_m": [0.06, 0.06, 0.06],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.06, 0.06, 0.06],
+                    },
+                    "color": [0.0, 0.0, 1.0],
                 },
             ]
         if self.current_table_env_id == "ycb":
@@ -263,7 +273,13 @@ class FakeSimManager:
                         "position_xyz_m": [0.2, 0.18, 1.55],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "scale_xyz": [1.0, 1.0, 1.0],
+                    "bbox_size_xyz_m": [0.16, 0.06, 0.21],
+                    "geometry": {
+                        "type": "mesh",
+                        "asset_filename": "003_cracker_box.usd",
+                        "semantic_label": "cracker_box",
+                    },
+                    "color": None,
                 },
                 {
                     "id": "mustard_bottle_1",
@@ -271,7 +287,124 @@ class FakeSimManager:
                         "position_xyz_m": [0.34, -0.1, 1.55],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "scale_xyz": [1.0, 1.0, 1.0],
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.19],
+                    "geometry": {
+                        "type": "mesh",
+                        "asset_filename": "006_mustard_bottle.usd",
+                        "semantic_label": "mustard_bottle",
+                    },
+                    "color": None,
+                },
+            ]
+        if self.current_table_env_id == "multi_geometry":
+            return [
+                {
+                    "id": "left_plate",
+                    "pose": {
+                        "position_xyz_m": [-0.34, 0.01, 1.5075],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+                    "geometry": {
+                        "type": "cylinder",
+                        "radius_m": 0.09,
+                        "height_m": 0.015,
+                    },
+                    "color": [0.15, 0.75, 0.85],
+                },
+                {
+                    "id": "right_plate",
+                    "pose": {
+                        "position_xyz_m": [0.34, 0.01, 1.5075],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+                    "geometry": {
+                        "type": "cylinder",
+                        "radius_m": 0.09,
+                        "height_m": 0.015,
+                    },
+                    "color": [0.95, 0.55, 0.75],
+                },
+                {
+                    "id": "red_cube",
+                    "pose": {
+                        "position_xyz_m": [-0.14, 0.12, 1.57],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.08, 0.08, 0.08],
+                    },
+                    "color": [1.0, 0.0, 0.0],
+                },
+                {
+                    "id": "blue_cube",
+                    "pose": {
+                        "position_xyz_m": [0.0, 0.12, 1.57],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.08, 0.08, 0.08],
+                    },
+                    "color": [0.0, 0.0, 1.0],
+                },
+                {
+                    "id": "green_block",
+                    "pose": {
+                        "position_xyz_m": [0.14, 0.12, 1.56],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.12, 0.08, 0.06],
+                    },
+                    "color": [0.0, 1.0, 0.0],
+                },
+                {
+                    "id": "yellow_block",
+                    "pose": {
+                        "position_xyz_m": [-0.14, -0.1, 1.56],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.10, 0.07, 0.06],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.10, 0.07, 0.06],
+                    },
+                    "color": [1.0, 1.0, 0.0],
+                },
+                {
+                    "id": "purple_cylinder",
+                    "pose": {
+                        "position_xyz_m": [0.0, -0.1, 1.575],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.09],
+                    "geometry": {
+                        "type": "cylinder",
+                        "radius_m": 0.04,
+                        "height_m": 0.09,
+                    },
+                    "color": [0.6, 0.0, 0.8],
+                },
+                {
+                    "id": "orange_cylinder",
+                    "pose": {
+                        "position_xyz_m": [0.14, -0.1, 1.5725],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.084, 0.084, 0.085],
+                    "geometry": {
+                        "type": "cylinder",
+                        "radius_m": 0.042,
+                        "height_m": 0.085,
+                    },
+                    "color": [1.0, 0.5, 0.0],
                 },
             ]
         return []
@@ -282,19 +415,19 @@ class _NeverDisconnectedRequest:
         return False
 
 
-def _create_fake_manager(tmp_path: Path) -> FakeSimManager:
-    rgb_path = tmp_path / "rgb.png"
-    depth_path = tmp_path / "depth.npy"
+def _create_fake_manager(case_output_dir: Path) -> FakeSimManager:
+    rgb_path = case_output_dir / "rgb.png"
+    depth_path = case_output_dir / "depth.npy"
     rgb_path.write_bytes(_ONE_BY_ONE_PNG_BYTES)
     depth_path.write_bytes(b"fake-npy-data")
 
     return FakeSimManager(rgb_path=rgb_path, depth_path=depth_path)
 
 
-def _create_test_client(tmp_path: Path) -> tuple[TestClient, FakeSimManager]:
-    fake_manager = _create_fake_manager(tmp_path)
+def _create_test_client(case_output_dir: Path) -> tuple[TestClient, FakeSimManager]:
+    fake_manager = _create_fake_manager(case_output_dir)
     app = create_app(
-        settings=ApiSettings(control_socket_path="/tmp/test-control.sock"),
+        settings=ApiSettings(control_socket_path=str(case_output_dir / "control.sock")),
         sim_manager_factory=lambda _: fake_manager,
         start_manager_on_startup=True,
     )
@@ -314,12 +447,12 @@ def _pick_free_port() -> int:
 
 
 @contextlib.contextmanager
-def _run_api_server_subprocess(tmp_path: Path) -> Iterator[str]:
+def _run_api_server_subprocess(case_output_dir: Path) -> Iterator[str]:
     host = "127.0.0.1"
     port = _pick_free_port()
     base_url = f"http://{host}:{port}"
-    stdout_log_path = tmp_path / "api.stdout.log"
-    stderr_log_path = tmp_path / "api.stderr.log"
+    stdout_log_path = case_output_dir / "api.stdout.log"
+    stderr_log_path = case_output_dir / "api.stderr.log"
     stdout_log = stdout_log_path.open("wb")
     stderr_log = stderr_log_path.open("wb")
     process = subprocess.Popen(
@@ -336,8 +469,8 @@ def _run_api_server_subprocess(tmp_path: Path) -> Iterator[str]:
         cwd=str(Path(__file__).resolve().parents[1]),
         env={
             **os.environ,
-            "SIMWORKER_SESSION_DIR": str(tmp_path / "session"),
-            "SIMWORKER_CONTROL_SOCKET_PATH": str(tmp_path / "control.sock"),
+            "SIMWORKER_SESSION_DIR": str(case_output_dir / "session"),
+            "SIMWORKER_CONTROL_SOCKET_PATH": str(case_output_dir / "control.sock"),
             "SIMWORKER_PYTHON_BIN": _worker_python(),
         },
         stdout=stdout_log,
@@ -475,8 +608,8 @@ def _measure_http_mjpeg_receive_fps(
     raise AssertionError("MJPEG stream ended before enough frames were received to measure FPS")
 
 
-def test_health_endpoint_returns_ok_payload(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_health_endpoint_returns_ok_payload(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     with client:
         response = client.get("/health")
     assert response.status_code == 200
@@ -491,8 +624,8 @@ def test_health_endpoint_returns_ok_payload(tmp_path: Path) -> None:
     assert fake_manager.ensure_started_calls == 1
 
 
-def test_capture_endpoint_returns_json_payload_with_download_urls(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_capture_endpoint_returns_json_payload_with_download_urls(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     with client:
         response = client.post("/cameras/table_top/capture")
     assert response.status_code == 200
@@ -521,8 +654,8 @@ def test_capture_endpoint_returns_json_payload_with_download_urls(tmp_path: Path
     assert ("get_camera_info", ("table_top",), {}) in fake_manager.calls
 
 
-def test_capture_artifact_download_endpoint_returns_binary_files(tmp_path: Path) -> None:
-    client, _ = _create_test_client(tmp_path)
+def test_capture_artifact_download_endpoint_returns_binary_files(case_output_dir: Path) -> None:
+    client, _ = _create_test_client(case_output_dir)
     with client:
         capture_response = client.post("/cameras/table_top/capture")
         capture_payload = capture_response.json()
@@ -542,8 +675,8 @@ def test_capture_artifact_download_endpoint_returns_binary_files(tmp_path: Path)
     assert depth_response.content == b"fake-npy-data"
 
 
-def test_capture_artifact_download_endpoint_returns_json_error_for_unknown_capture(tmp_path: Path) -> None:
-    client, _ = _create_test_client(tmp_path)
+def test_capture_artifact_download_endpoint_returns_json_error_for_unknown_capture(case_output_dir: Path) -> None:
+    client, _ = _create_test_client(case_output_dir)
     with client:
         response = client.get("/captures/capture-missing/artifacts/rgb")
     assert response.status_code == 200
@@ -553,8 +686,8 @@ def test_capture_artifact_download_endpoint_returns_json_error_for_unknown_captu
     }
 
 
-def test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up(tmp_path: Path) -> None:
-    fake_manager = _create_fake_manager(tmp_path)
+def test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up(case_output_dir: Path) -> None:
+    fake_manager = _create_fake_manager(case_output_dir)
     response = build_mjpeg_streaming_response(_NeverDisconnectedRequest(), fake_manager, "table_top")
     first_chunk = asyncio.run(_read_first_stream_chunk_and_close(response))
     assert response.media_type == "multipart/x-mixed-replace; boundary=frame"
@@ -565,8 +698,11 @@ def test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up(tmp_path: Pat
     assert any(call[0] == "stop_camera_stream" for call in fake_manager.calls)
 
 
-def test_open_mjpeg_stream_unregisters_consumer_shared_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_manager = _create_fake_manager(tmp_path)
+def test_open_mjpeg_stream_unregisters_consumer_shared_memory(
+    case_output_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_manager = _create_fake_manager(case_output_dir)
     unregister_calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
@@ -583,8 +719,8 @@ def test_open_mjpeg_stream_unregisters_consumer_shared_memory(tmp_path: Path, mo
         fake_manager.stop_camera_stream(opened_stream.stream_id)
 
 
-def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_table_env_endpoints_delegate_to_sim_manager(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     with client:
         list_response = client.get("/table-envs")
         load_response = client.put("/table-env/current/default")
@@ -593,7 +729,12 @@ def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
         objects_after_clear_response = client.get("/table-env/current/objects")
     assert list_response.status_code == 200
     assert list_response.json()["ok"] is True
-    assert list_response.json()["table_env_count"] == 2
+    assert {item["id"] for item in list_response.json()["table_envs"]} == {
+        "default",
+        "multi_geometry",
+        "ycb",
+    }
+    assert list_response.json()["table_env_count"] == 3
 
     assert load_response.status_code == 200
     assert load_response.json() == {
@@ -629,8 +770,8 @@ def test_table_env_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
     assert ("get_table_env_objects_info", (), {}) in fake_manager.calls
 
 
-def test_robot_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_robot_endpoints_delegate_to_sim_manager(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     request_body = {
         "task": {
             "id": "task-001",
@@ -666,8 +807,8 @@ def test_robot_endpoints_delegate_to_sim_manager(tmp_path: Path) -> None:
     ) in fake_manager.calls
 
 
-def test_worker_restart_endpoint_restarts_same_manager_instance(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_worker_restart_endpoint_restarts_same_manager_instance(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     with client:
         response = client.post("/worker/restart")
     assert response.status_code == 200
@@ -677,8 +818,8 @@ def test_worker_restart_endpoint_restarts_same_manager_instance(tmp_path: Path) 
     assert fake_manager.close_calls >= 1
 
 
-def test_sim_manager_errors_are_wrapped_as_ok_false_json(tmp_path: Path) -> None:
-    client, fake_manager = _create_test_client(tmp_path)
+def test_sim_manager_errors_are_wrapped_as_ok_false_json(case_output_dir: Path) -> None:
+    client, fake_manager = _create_test_client(case_output_dir)
     fake_manager.raise_on["list_camera"] = SimManagerError("camera registry unavailable")
     with client:
         response = client.get("/cameras")
@@ -689,8 +830,8 @@ def test_sim_manager_errors_are_wrapped_as_ok_false_json(tmp_path: Path) -> None
     }
 
 
-def test_request_validation_errors_are_wrapped_as_ok_false_json(tmp_path: Path) -> None:
-    client, _ = _create_test_client(tmp_path)
+def test_request_validation_errors_are_wrapped_as_ok_false_json(case_output_dir: Path) -> None:
+    client, _ = _create_test_client(case_output_dir)
     with client:
         response = client.post("/robot/tasks", json={"task": {"id": "task-001"}})
     assert response.status_code == 200
@@ -698,7 +839,7 @@ def test_request_validation_errors_are_wrapped_as_ok_false_json(tmp_path: Path) 
     assert "body.task.objects" in response.json()["error_message"]
 
 
-def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path) -> None:
+def test_fastapi_real_integration_exercises_non_stream_interfaces(case_output_dir: Path) -> None:
     if os.environ.get(_ENABLE_REAL_TEST_ENV) != "1":
         pytest.skip(
             "该测试会真实启动 Isaac Sim worker。"
@@ -707,8 +848,8 @@ def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path
 
     app = create_app(
         settings=ApiSettings(
-            session_dir=str(tmp_path / "session"),
-            control_socket_path=str(tmp_path / "control.sock"),
+            session_dir=str(case_output_dir / "session"),
+            control_socket_path=str(case_output_dir / "control.sock"),
             python_bin=_worker_python(),
         ),
         start_manager_on_startup=True,
@@ -731,7 +872,11 @@ def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path
         table_envs_response = client.get("/table-envs")
         assert table_envs_response.status_code == 200
         assert table_envs_response.json()["ok"] is True
-        assert {item["id"] for item in table_envs_response.json()["table_envs"]} == {"default", "ycb"}
+        assert {item["id"] for item in table_envs_response.json()["table_envs"]} == {
+            "default",
+            "multi_geometry",
+            "ycb",
+        }
 
         cameras_response = client.get("/cameras")
         assert cameras_response.status_code == 200
@@ -808,14 +953,14 @@ def test_fastapi_real_integration_exercises_non_stream_interfaces(tmp_path: Path
         assert restart_response.json()["table_env"] == {"loaded": False, "id": None}
 
 
-def test_fastapi_real_integration_streams_mjpeg_frames(tmp_path: Path) -> None:
+def test_fastapi_real_integration_streams_mjpeg_frames(case_output_dir: Path) -> None:
     if os.environ.get(_ENABLE_REAL_TEST_ENV) != "1":
         pytest.skip(
             "该测试会真实启动 Isaac Sim worker。"
             f"如需运行，请设置 {_ENABLE_REAL_TEST_ENV}=1。"
         )
 
-    with _run_api_server_subprocess(tmp_path) as base_url:
+    with _run_api_server_subprocess(case_output_dir) as base_url:
         with httpx.Client(base_url=base_url, timeout=120.0) as client:
             load_table_env_response = client.put("/table-env/current/default")
             assert load_table_env_response.status_code == 200
@@ -828,7 +973,7 @@ def test_fastapi_real_integration_streams_mjpeg_frames(tmp_path: Path) -> None:
                     response,
                     duration_sec=_MJPEG_SAMPLE_DURATION_SEC,
                     camera_id="table_top",
-                    output_dir=tmp_path / "mjpeg_metrics",
+                    output_dir=case_output_dir / "mjpeg_metrics",
                 )
                 assert metrics["frame_count"] >= 2
                 assert metrics["observed_fps"] > 0.0
