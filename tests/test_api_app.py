@@ -641,16 +641,12 @@ def test_capture_endpoint_returns_json_payload_with_download_urls(case_output_di
     assert rgb_ref["kind"] == "artifact_file"
     assert rgb_ref["content_type"] == "image/png"
     assert "path" not in rgb_ref
-    assert rgb_ref["download_url"] == (
-        f"http://testserver/captures/{response_payload['capture']['id']}/artifacts/rgb"
-    )
+    assert rgb_ref["download_url"] == f"/captures/{response_payload['capture']['id']}/artifacts/rgb"
     assert depth_ref["id"] == "artifact-depth-001"
     assert depth_ref["kind"] == "artifact_file"
     assert depth_ref["content_type"] == "application/x-npy"
     assert "path" not in depth_ref
-    assert depth_ref["download_url"] == (
-        f"http://testserver/captures/{response_payload['capture']['id']}/artifacts/depth"
-    )
+    assert depth_ref["download_url"] == f"/captures/{response_payload['capture']['id']}/artifacts/depth"
     assert ("get_camera_info", ("table_top",), {}) in fake_manager.calls
 
 

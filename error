@@ -1,0 +1,122 @@
+Failed to stop MJPEG stream: stream_id=stream-table_overview-003
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7f0425529810 by <Task pending name='Task-89' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_overview-003 does not exist
+Failed to stop MJPEG stream: stream_id=stream-table_top-003
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7f0427914ee0 by <Task pending name='Task-88' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_top-003 does not exist
+
+
+Failed to stop MJPEG stream: stream_id=stream-table_overview-002
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7fa9f1128cd0 by <Task pending name='Task-66' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_overview-002 does not exist
+Failed to stop MJPEG stream: stream_id=stream-table_overview-002
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7fa9f11d3580 by <Task pending name='Task-118' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_overview-002 does not exist
+Failed to stop MJPEG stream: stream_id=stream-table_top-002
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7fa9f1150130 by <Task pending name='Task-65' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_top-002 does not exist
+Failed to stop MJPEG stream: stream_id=stream-table_top-002
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 109, in _iter_mjpeg_multipart_bytes
+    header, frame_bytes = await asyncio.to_thread(
+  File "/usr/lib/python3.10/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 7fa9f112ad10 by <Task pending name='Task-85' coro=<RequestResponseCycle.run_asgi() running at /root/simworker_service/.venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:416> cb=[set.discard()]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/simworker_service/api/mjpeg_stream.py", line 132, in _iter_mjpeg_multipart_bytes
+    sim_manager.stop_camera_stream(opened_stream.stream_id)
+  File "/root/simworker_service/simworker/sim_manager.py", line 190, in stop_camera_stream
+    return self._call_command(
+  File "/root/simworker_service/simworker/sim_manager.py", line 133, in _call_command
+    return self._request(command_type, payload or {}, auto_start=True)
+  File "/root/simworker_service/simworker/sim_manager.py", line 300, in _request
+    raise SimManagerError(
+simworker.sim_manager.SimManagerError: stream.id stream-table_top-002 does not exist

@@ -1,0 +1,17 @@
+2026-04-06 03:32:14,898 INFO Initializing simworker runtime in /root/simworker_service/simworker/test_gui/runs/2026-04-06_03-32-14
+2026-04-06 03:32:14,952 INFO Bootstrapping Isaac Sim SimulationApp in GUI mode
+2026-04-06 03:32:30,466 INFO Isaac base environment created with ground, light, table, franka, and two cameras
+2026-04-06 03:32:30,466 INFO Simworker runtime is ready (object_count=0)
+2026-04-06 03:32:30,466 INFO GUI runner started
+2026-04-06 03:32:30,466 INFO Session dir: /root/simworker_service/simworker/test_gui/runs
+2026-04-06 03:32:30,466 INFO Task code file: /root/simworker_service/simworker/test_gui/code.py
+2026-04-06 03:32:30,466 INFO Task objects file: /root/simworker_service/simworker/test_gui/objects.json
+2026-04-06 03:32:30,466 INFO Keeping base environment only; no table environment will be loaded
+2026-04-06 03:32:30,466 INFO Resolved task objects count: 2
+2026-04-06 03:32:30,467 INFO Starting run_task task_id=code object_count=2
+2026-04-06 03:32:30,488 INFO Starting Franka pick_and_place pick_center=[0.15997475385665894, 0.21997852623462677, 1.5299999713897705] place_center=[0.31997472047805786, -0.14002147316932678, 1.589999852180481] grasp_offset=[0.0, 0.0, 0.0] actual_pick=[0.15997475385665894, 0.21997852623462677, 1.5299999713897705] actual_place=[0.31997472047805786, -0.14002147316932678, 1.589999852180481]
+2026-04-06 03:32:51,407 INFO Completed Franka pick_and_place
+2026-04-06 03:32:51,408 INFO Completed run_task task_id=code
+2026-04-06 03:32:51,408 INFO Task finished: {"task": {"id": "code", "status": "succeeded", "result": null, "started_at": "2026-04-05T19:32:30Z", "finished_at": "2026-04-05T19:32:51Z"}}
+2026-04-06 03:32:51,408 INFO Task completed. Isaac Sim GUI will stay open until the window is closed.
+2026-04-06 03:40:04,613 INFO Closing SimulationApp

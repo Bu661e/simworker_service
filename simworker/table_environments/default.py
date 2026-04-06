@@ -13,7 +13,7 @@ _DEFAULT_CUBES = (
         "prim_path": "/World/Tabletop/red_cube",
         "position_xyz_m": (0.16, 0.22, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.04, 0.04, 0.04),
+        "size_xyz_m": (0.07, 0.07, 0.07),
         "color_rgb": (0.62, 0.06, 0.06),
     },
     {
@@ -21,7 +21,7 @@ _DEFAULT_CUBES = (
         "prim_path": "/World/Tabletop/blue_cube",
         "position_xyz_m": (0.32, -0.14, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.04, 0.04, 0.04),
+        "size_xyz_m": (0.07, 0.07, 0.07),
         "color_rgb": (0.08, 0.24, 0.62),
     },
 )

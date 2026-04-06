@@ -8,6 +8,8 @@ if TYPE_CHECKING:
 
 _DEFAULT_APPROACH_CLEARANCE_M = 0.30
 _DEFAULT_PICK_PLACE_EVENTS_DT = [0.008, 0.005, 1.0, 0.1, 0.05, 0.05, 0.0025, 1.0, 0.008, 0.08]
+_DEFAULT_GRIPPER_OPEN_WAIT_STEPS = 12
+_DEFAULT_GRIPPER_OPEN_POSITION_ABS_TOL = 1e-3
 
 
 class FrankaRobotAPI:
@@ -50,6 +52,7 @@ class FrankaRobotAPI:
         controller = self._get_pick_place_controller()
         articulation_controller = self._get_articulation_controller()
         self._runtime.ensure_world_playing()
+        self._prepare_gripper_for_pick()
 
         actual_pick_target = picking_position + grasp_offset_xyz
         actual_place_target = placing_position + grasp_offset_xyz
@@ -85,6 +88,43 @@ class FrankaRobotAPI:
             self._runtime.robot_status = "idle"
 
         self._logger.info("Completed Franka pick_and_place")
+
+    def _prepare_gripper_for_pick(self) -> None:
+        import numpy as np
+
+        gripper = getattr(self._robot, "gripper", None)
+        if gripper is None:
+            raise RuntimeError("franka robot gripper is not initialized")
+
+        open_method = getattr(gripper, "open", None)
+        if not callable(open_method):
+            raise RuntimeError("franka robot gripper does not expose an open() method")
+
+        self._logger.info("Opening Franka gripper before pick")
+        open_method()
+
+        joint_opened_positions = getattr(gripper, "joint_opened_positions", None)
+        get_joint_positions = getattr(gripper, "get_joint_positions", None)
+        if joint_opened_positions is not None and callable(get_joint_positions):
+            target_positions = np.asarray(joint_opened_positions, dtype=np.float64)
+            for _ in range(_DEFAULT_GRIPPER_OPEN_WAIT_STEPS):
+                self._runtime.step_world_for_robot_action()
+                current_positions = np.asarray(get_joint_positions(), dtype=np.float64)
+                if current_positions.shape == target_positions.shape and np.allclose(
+                    current_positions,
+                    target_positions,
+                    atol=_DEFAULT_GRIPPER_OPEN_POSITION_ABS_TOL,
+                    rtol=0.0,
+                ):
+                    return
+            self._logger.warning(
+                "Franka gripper did not reach opened positions within %s steps; continuing with current state",
+                _DEFAULT_GRIPPER_OPEN_WAIT_STEPS,
+            )
+            return
+
+        for _ in range(_DEFAULT_GRIPPER_OPEN_WAIT_STEPS):
+            self._runtime.step_world_for_robot_action()
 
     def _get_pick_place_controller(self) -> object:
         if self._pick_place_controller is None:

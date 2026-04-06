@@ -30,7 +30,7 @@ class ApiSettings:
     worker_module: str = "simworker.entrypoint"
     cwd: str | None = None
     startup_timeout_sec: float = 240.0
-    request_timeout_sec: float = 60.0
+    request_timeout_sec: float = 180.0
     shutdown_timeout_sec: float = 60.0
 
     @classmethod
@@ -42,7 +42,7 @@ class ApiSettings:
             worker_module=os.environ.get("SIMWORKER_WORKER_MODULE", "simworker.entrypoint"),
             cwd=os.environ.get("SIMWORKER_CWD") or None,
             startup_timeout_sec=_float_env("SIMWORKER_STARTUP_TIMEOUT_SEC", 240.0),
-            request_timeout_sec=_float_env("SIMWORKER_REQUEST_TIMEOUT_SEC", 60.0),
+            request_timeout_sec=_float_env("SIMWORKER_REQUEST_TIMEOUT_SEC", 180.0),
             shutdown_timeout_sec=_float_env("SIMWORKER_SHUTDOWN_TIMEOUT_SEC", 60.0),
         )
 
@@ -341,7 +341,7 @@ def _build_camera_capture_response(
         response_camera_payload,
         "rgb_image",
         str(
-            request.url_for(
+            request.app.url_path_for(
                 "download_capture_artifact",
                 capture_id=capture_id,
                 artifact_kind="rgb",
@@ -352,7 +352,7 @@ def _build_camera_capture_response(
         response_camera_payload,
         "depth_image",
         str(
-            request.url_for(
+            request.app.url_path_for(
                 "download_capture_artifact",
                 capture_id=capture_id,
                 artifact_kind="depth",

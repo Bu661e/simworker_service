@@ -115,7 +115,7 @@ SimManager(
     worker_module: str = "simworker.entrypoint",
     cwd: str | Path | None = None,
     startup_timeout_sec: float = 240.0,
-    request_timeout_sec: float = 60.0,
+    request_timeout_sec: float = 180.0,
     shutdown_timeout_sec: float = 60.0,
     extra_env: Mapping[str, str] | None = None,
 )

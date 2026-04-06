@@ -12,7 +12,7 @@ from typing import Any, Mapping, TextIO
 from simworker.protocol import recv_json_message, send_json_message
 
 _DEFAULT_STARTUP_TIMEOUT_SEC = 240.0
-_DEFAULT_REQUEST_TIMEOUT_SEC = 60.0
+_DEFAULT_REQUEST_TIMEOUT_SEC = 180.0
 _DEFAULT_SHUTDOWN_TIMEOUT_SEC = 60.0
 
 

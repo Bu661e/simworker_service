@@ -218,7 +218,7 @@
         "id": "artifact-rgb-001",
         "kind": "artifact_file",
         "content_type": "image/png",
-        "download_url": "http://api-host/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/rgb"
+        "download_url": "/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/rgb"
       }
     },
     "depth_image": {
@@ -227,7 +227,7 @@
         "id": "artifact-depth-001",
         "kind": "artifact_file",
         "content_type": "application/x-npy",
-        "download_url": "http://api-host/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/depth"
+        "download_url": "/captures/capture-4d0d5b1f9d6b4f17ab9c6c7d95f0a4e1/artifacts/depth"
       }
     }
   }
@@ -237,7 +237,7 @@
 说明：
 
 - `capture.id` 是 API 层生成的本次采集记录标识，用于后续下载接口。
-- `download_url` 是 API 层对外暴露的 artifact 下载地址，不直接暴露 worker 本地文件路径。
+- `download_url` 是 API 层对外暴露的 artifact 相对下载路径，不直接暴露 worker 本地文件路径。
 - 客户端拿到 `download_url` 后，直接发起一次 `GET` 请求即可下载对应文件；不需要再做别的转换。
 - `pose` 仍然保留，方便兼容上层已有调用方。
 - 当前下载链接由 API 进程内存中的 `capture.id -> artifact` 映射维护；如果 API 服务重启，旧链接不保证继续可用。
@@ -273,7 +273,7 @@
 接口作用：
 
 - 下载某次 `capture` 产生的单个文件型产物
-- `POST /cameras/{camera_id}/capture` 响应里的 `download_url` 就是这个接口的完整地址
+- `POST /cameras/{camera_id}/capture` 响应里的 `download_url` 就是这个接口的相对路径
 - 这一节主要是说明 `download_url` 最终落到哪个 API 路径，以及该路径返回什么内容
 - 当前 `artifact_kind` 只支持：
   - `rgb`

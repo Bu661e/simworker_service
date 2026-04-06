@@ -34,7 +34,7 @@ _MULTI_GEOMETRY_OBJECTS = (
         "prim_path": "/World/Tabletop/red_cube",
         "position_xyz_m": (-0.14, 0.12, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.04, 0.04, 0.04),
+        "size_xyz_m": (0.07, 0.07, 0.07),
         "color_rgb": (1.0, 0.0, 0.0),
     },
     {
@@ -43,7 +43,7 @@ _MULTI_GEOMETRY_OBJECTS = (
         "prim_path": "/World/Tabletop/blue_cube",
         "position_xyz_m": (0.0, 0.12, 1.57),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.04, 0.04, 0.04),
+        "size_xyz_m": (0.07, 0.07, 0.07),
         "color_rgb": (0.0, 0.0, 1.0),
     },
     {
@@ -52,7 +52,7 @@ _MULTI_GEOMETRY_OBJECTS = (
         "prim_path": "/World/Tabletop/green_block",
         "position_xyz_m": (0.14, 0.12, 1.56),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.14, 0.04, 0.04),
+        "size_xyz_m": (0.14, 0.07, 0.07),
         "color_rgb": (0.0, 1.0, 0.0),
     },
     {
@@ -61,7 +61,7 @@ _MULTI_GEOMETRY_OBJECTS = (
         "prim_path": "/World/Tabletop/yellow_block",
         "position_xyz_m": (-0.14, -0.1, 1.56),
         "rotation_rpy_deg": (0.0, 0.0, 0.0),
-        "size_xyz_m": (0.14, 0.04, 0.04),
+        "size_xyz_m": (0.14, 0.07, 0.07),
         "color_rgb": (1.0, 1.0, 0.0),
     },
     {
