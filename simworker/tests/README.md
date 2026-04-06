@@ -66,13 +66,13 @@
   - `left_plate`
   - `right_plate`
   - `red_cube`
+  - `yellow_cube`
   - `blue_cube`
-  - `green_block`
-  - `yellow_block`
-  - `purple_cylinder`
-  - `orange_cylinder`
+  - `red_cylinder`
+  - `yellow_cylinder`
+  - `blue_cylinder`
 
-这个测试主要用于验证多几何体场景的对象信息返回是否正确。
+这个测试主要用于验证多几何体场景当前这套 `2 plates + 3 cubes + 3 cylinders` 的对象信息返回是否正确。
 
 #### `test_simworker_default_env_two_camera_snapshots_and_dual_streams`
 

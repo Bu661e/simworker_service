@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
+from threading import Lock
 from typing import Any, AsyncIterator, Protocol
 
 from fastapi import Request
@@ -36,14 +37,43 @@ class OpenedMjpegStream:
     shm: shared_memory.SharedMemory
 
 
+class MjpegStreamConsumerRegistry:
+    def __init__(self) -> None:
+        self._consumer_count_by_stream_id: dict[str, int] = {}
+        self._lock = Lock()
+
+    def retain(self, stream_id: str) -> int:
+        with self._lock:
+            next_count = self._consumer_count_by_stream_id.get(stream_id, 0) + 1
+            self._consumer_count_by_stream_id[stream_id] = next_count
+            return next_count
+
+    def release(self, stream_id: str) -> int:
+        with self._lock:
+            current_count = self._consumer_count_by_stream_id.get(stream_id)
+            if current_count is None:
+                return 0
+            if current_count <= 1:
+                self._consumer_count_by_stream_id.pop(stream_id, None)
+                return 0
+            next_count = current_count - 1
+            self._consumer_count_by_stream_id[stream_id] = next_count
+            return next_count
+
+    def clear(self) -> None:
+        with self._lock:
+            self._consumer_count_by_stream_id.clear()
+
+
 def build_mjpeg_streaming_response(
     request: Request,
     sim_manager: StreamCapableSimManager,
     camera_id: str,
 ) -> StreamingResponse:
-    opened_stream = _open_mjpeg_stream(sim_manager, camera_id)
+    consumer_registry = _get_consumer_registry(request)
+    opened_stream = _open_mjpeg_stream(sim_manager, camera_id, consumer_registry=consumer_registry)
     return StreamingResponse(
-        _iter_mjpeg_multipart_bytes(request, sim_manager, opened_stream),
+        _iter_mjpeg_multipart_bytes(request, sim_manager, opened_stream, consumer_registry=consumer_registry),
         media_type=_MJPEG_MEDIA_TYPE,
         headers={
             "Cache-Control": "no-store",
@@ -52,7 +82,13 @@ def build_mjpeg_streaming_response(
     )
 
 
-def _open_mjpeg_stream(sim_manager: StreamCapableSimManager, camera_id: str) -> OpenedMjpegStream:
+def _open_mjpeg_stream(
+    sim_manager: StreamCapableSimManager,
+    camera_id: str,
+    *,
+    consumer_registry: MjpegStreamConsumerRegistry | None = None,
+) -> OpenedMjpegStream:
+    resolved_consumer_registry = consumer_registry or MjpegStreamConsumerRegistry()
     stream_payload = sim_manager.start_camera_stream(camera_id, buffer_mode="latest_frame")
     stream_object = stream_payload.get("stream")
     if not isinstance(stream_object, dict):
@@ -79,12 +115,17 @@ def _open_mjpeg_stream(sim_manager: StreamCapableSimManager, camera_id: str) -> 
         raise ValueError("camera stream payload is missing stream.ref.path")
 
     shm_name = _shared_memory_name_from_path(ref_path)
+    resolved_consumer_registry.retain(stream_id)
     try:
         shm = shared_memory.SharedMemory(name=shm_name, create=False)
         _unregister_consumer_shared_memory(shm)
     except Exception:
         try:
-            sim_manager.stop_camera_stream(stream_id)
+            _release_stream_consumer(
+                sim_manager,
+                resolved_consumer_registry,
+                stream_id,
+            )
         except Exception:
             logger.exception("Failed to stop stream after shared memory attach failure: stream_id=%s", stream_id)
         raise
@@ -99,6 +140,8 @@ async def _iter_mjpeg_multipart_bytes(
     request: Request,
     sim_manager: StreamCapableSimManager,
     opened_stream: OpenedMjpegStream,
+    *,
+    consumer_registry: MjpegStreamConsumerRegistry,
 ) -> AsyncIterator[bytes]:
     last_frame_id = -1
     try:
@@ -129,7 +172,11 @@ async def _iter_mjpeg_multipart_bytes(
         except Exception:
             logger.exception("Failed to close MJPEG shared memory: stream_id=%s", opened_stream.stream_id)
         try:
-            sim_manager.stop_camera_stream(opened_stream.stream_id)
+            _release_stream_consumer(
+                sim_manager,
+                consumer_registry,
+                opened_stream.stream_id,
+            )
         except Exception:
             logger.exception("Failed to stop MJPEG stream: stream_id=%s", opened_stream.stream_id)
 
@@ -172,6 +219,54 @@ def _unregister_consumer_shared_memory(shm: shared_memory.SharedMemory) -> None:
         resource_tracker.unregister(tracked_name, "shared_memory")
     except Exception:
         logger.debug("Failed to unregister shared memory from resource_tracker: %s", tracked_name, exc_info=True)
+
+
+def _get_consumer_registry(request: Request) -> MjpegStreamConsumerRegistry:
+    app = getattr(request, "app", None)
+    if app is None:
+        return MjpegStreamConsumerRegistry()
+
+    state = getattr(app, "state", None)
+    if state is None:
+        return MjpegStreamConsumerRegistry()
+
+    registry = getattr(state, "mjpeg_stream_consumer_registry", None)
+    if isinstance(registry, MjpegStreamConsumerRegistry):
+        return registry
+
+    registry = MjpegStreamConsumerRegistry()
+    state.mjpeg_stream_consumer_registry = registry
+    return registry
+
+
+def _release_stream_consumer(
+    sim_manager: StreamCapableSimManager,
+    consumer_registry: MjpegStreamConsumerRegistry,
+    stream_id: str,
+) -> None:
+    remaining_consumer_count = consumer_registry.release(stream_id)
+    if remaining_consumer_count > 0:
+        logger.debug(
+            "MJPEG request closed but worker stream is still in use: stream_id=%s remaining_consumers=%s",
+            stream_id,
+            remaining_consumer_count,
+        )
+        return
+    _stop_stream_if_present(sim_manager, stream_id)
+
+
+def _stop_stream_if_present(sim_manager: StreamCapableSimManager, stream_id: str) -> None:
+    try:
+        sim_manager.stop_camera_stream(stream_id)
+    except Exception as exc:
+        if _is_missing_stream_error(exc, stream_id):
+            logger.info("MJPEG stream already stopped before API cleanup: stream_id=%s", stream_id)
+            return
+        raise
+
+
+def _is_missing_stream_error(exc: Exception, stream_id: str) -> bool:
+    return f"stream.id {stream_id} does not exist" in str(exc)
 
 
 def _wait_for_next_frame(

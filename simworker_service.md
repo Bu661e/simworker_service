@@ -318,14 +318,15 @@
   - 从共享内存读取 `rgb24` 帧
   - 将每帧编码为 JPEG
   - 通过 HTTP `MJPEG` 对外发布
-  - 在客户端断开后，通过 `SimManager.stop_camera_stream(stream_id)` 回收底层流
+  - 在客户端断开后，按 API 层内部订阅计数决定是否真正调用 `SimManager.stop_camera_stream(stream_id)` 回收底层流
 
 当前状态：
 
 - 当前对外接口路径先固定为 `GET /cameras/{camera_id}/stream`
 - 当前实现已经固定为 `MJPEG`
-- 这是一个面向“单客户端、自用、非生产环境”的最小实现
-- 当前不做多客户端复用，不做订阅计数，不做复杂重连
+- 这是一个面向“少量前端页面预览、自用、非生产环境”的最小实现
+- 当前 API 层已经支持同一 `camera_id` 的多个 HTTP `MJPEG` consumer 共享同一条底层 simworker stream
+- 当前不做更复杂的鉴权、转码、跨实例共享或高级重连
 - 底层统一依赖：
   - `SimManager.start_camera_stream(camera_id)`
   - `SimManager.stop_camera_stream(stream_id)`
@@ -349,7 +350,7 @@
 
 - 带宽明显高于压缩视频方案
 - 延迟通常高于 WebRTC
-- 当前实现只按单客户端场景做最小闭环，不提供更复杂的流管理能力
+- 当前实现仍是最小闭环，只额外补了 API 层订阅计数，避免重复连接或重复断开时把同一条底层流 stop 多次
 
 后续扩展说明：
 
@@ -364,8 +365,10 @@
 说明：
 
 - 该接口对客户端来说是单个 HTTP 视频流接口
-- 对 API 层内部来说，这一版只需要“收到请求就启动一条底层流，断开时回收”
-- 当前不额外维护多客户端订阅计数
+- 对 API 层内部来说，这一版会先调用 `SimManager.start_camera_stream(camera_id)`，并在 API 进程内维护订阅计数
+- 同一 `camera_id` 的多个 HTTP 连接允许共享同一条底层 simworker stream
+- 只有最后一个 HTTP consumer 断开时，API 层才会真正调用 `SimManager.stop_camera_stream(stream_id)`
+- 如果底层流已经被其他路径提前关闭，API 层会把这次 stop 当作幂等清理，而不是额外报错
 
 前端接入方式：
 
@@ -397,6 +400,9 @@ export function CameraStream() {
 - 前端不需要自己解析 `multipart/x-mixed-replace`
 - 浏览器会持续接收并刷新 JPEG 帧
 - 如果后端返回的是 `ok=false` 的 JSON 错误，那么这个 `<img>` 不会正常显示，因此前端通常还应先调用一次 `GET /cameras` 或在页面上额外做错误兜底
+- 前端应保证同一页面内，同一个 `camera_id` 最多只挂一个活跃 `<img src=".../stream">`
+- 结束会话、切换路由或销毁页面时，应先卸载 `<img>` 或清空其 `src`，再调用 `DELETE /table-env/current`
+- 不建议在普通状态更新时反复改动 `<img>` 的 `key` 或 `src`，否则容易触发重复连接
 
 失败响应体示例：
 
@@ -467,7 +473,7 @@ export function CameraStream() {
 - API 层不再自己维护“清空场景后再加载”的逻辑
 - 同一时刻最多只允许存在一套已加载的 `table_env`
 - 当前内置环境 ID 以 `GET /table-envs` 返回结果为准；当前实现包括 `default`、`multi_geometry` 和 `ycb`
-- `multi_geometry` 当前包含 8 个对象，其中有 2 个固定分类圆盘 `left_plate` / `right_plate`
+- `multi_geometry` 当前包含 8 个对象，其中有 2 个固定分类圆盘 `left_plate` / `right_plate`、3 个立方体和 3 个圆柱体
 
 URL 示例：
 
@@ -623,7 +629,7 @@ PUT /table-env/current/default
 ```
 
 例如，在 `multi_geometry` 环境下，返回体里的 `objects` 可以节选成下面这样
-（下面只保留盘子、立方体、长方体、圆柱体 4 类代表对象；真实返回时 `object_count` 仍为 `8`）：
+（下面只保留盘子、立方体、圆柱体 3 类代表对象；真实返回时 `object_count` 仍为 `8`）：
 
 ```json
 {
@@ -637,13 +643,13 @@ PUT /table-env/current/default
     {
       "id": "left_plate",
       "pose": {
-        "position_xyz_m": [-0.34, 0.01, 1.5075],
+        "position_xyz_m": [-0.5, 0.01, 1.5075],
         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
       },
-      "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+      "bbox_size_xyz_m": [0.4, 0.4, 0.015],
       "geometry": {
         "type": "cylinder",
-        "radius_m": 0.09,
+        "radius_m": 0.2,
         "height_m": 0.015
       },
       "color": [0.15, 0.75, 0.85]
@@ -662,22 +668,22 @@ PUT /table-env/current/default
       "color": [1.0, 0.0, 0.0]
     },
     {
-      "id": "green_block",
+      "id": "yellow_cube",
       "pose": {
-        "position_xyz_m": [0.14, 0.12, 1.56],
+        "position_xyz_m": [0.0, 0.12, 1.57],
         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
       },
-      "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+      "bbox_size_xyz_m": [0.08, 0.08, 0.08],
       "geometry": {
         "type": "cuboid",
-        "size_xyz_m": [0.12, 0.08, 0.06]
+        "size_xyz_m": [0.08, 0.08, 0.08]
       },
-      "color": [0.0, 1.0, 0.0]
+      "color": [1.0, 1.0, 0.0]
     },
     {
-      "id": "purple_cylinder",
+      "id": "blue_cylinder",
       "pose": {
-        "position_xyz_m": [0.0, -0.1, 1.575],
+        "position_xyz_m": [0.14, -0.1, 1.575],
         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
       },
       "bbox_size_xyz_m": [0.08, 0.08, 0.09],
@@ -686,7 +692,7 @@ PUT /table-env/current/default
         "radius_m": 0.04,
         "height_m": 0.09
       },
-      "color": [0.6, 0.0, 0.8]
+      "color": [0.0, 0.0, 1.0]
     }
   ]
 }
@@ -701,7 +707,7 @@ PUT /table-env/current/default
 - `color`：对象颜色，当前约定为 RGB 三元组；如果没有稳定的单一颜色，也可以返回 `null`
 - 当前基础场景按机器人视角约定 `front = +y`、`back = -y`、`left = -x`、`right = +x`、`up = +z`
 - 对 `multi_geometry` 而言，`left_plate` 位于 `x < 0`，`right_plate` 位于 `x > 0`
-- `multi_geometry` 的 `objects` 当前会返回 8 个对象，包含这两个固定分类圆盘；如果前端或任务代码只关心可抓取物体，需要自行过滤
+- `multi_geometry` 的 `objects` 当前会返回 8 个对象，包含这两个固定分类圆盘，以及红/黄/蓝三色的 3 个立方体和 3 个圆柱体；如果前端或任务代码只关心可抓取物体，需要自行过滤掉盘子
 - `bbox_size_xyz_m` 是统一尺寸描述字段；前端或上层逻辑可以优先基于它做尺寸展示或粗粒度规划
 - 如果需要更精确的形状参数，例如圆柱体半径和高度，应从 `geometry` 里读取
 

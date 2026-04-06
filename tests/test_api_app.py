@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import httpx
@@ -18,7 +20,7 @@ import numpy as np
 import pytest
 
 from api.mjpeg_stream import _open_mjpeg_stream, build_mjpeg_streaming_response
-from api.main import ApiSettings, create_app
+from api.main import ApiSettings, IgnoreRootPathAccessLogFilter, create_app
 from simworker.camera_streams import create_camera_stream_runtime_state
 from simworker import SimManagerError
 from simworker.tests.test_simworker_integration import _ENABLE_REAL_TEST_ENV, _worker_python
@@ -42,7 +44,9 @@ class FakeSimManager:
         self.raise_on: dict[str, Exception] = {}
         self.stream_counter = 0
         self.stream_states: dict[str, object] = {}
+        self.stream_ids_by_camera: dict[str, str] = {}
         self.current_table_env_id: str | None = None
+        self.reuse_running_streams = False
 
     def ensure_started(self) -> "FakeSimManager":
         self.ensure_started_calls += 1
@@ -185,6 +189,14 @@ class FakeSimManager:
     def start_camera_stream(self, camera_id: str, *, buffer_mode: str = "latest_frame") -> dict[str, Any]:
         self._maybe_raise("start_camera_stream")
         self.calls.append(("start_camera_stream", (camera_id,), {"buffer_mode": buffer_mode}))
+        if self.reuse_running_streams:
+            existing_stream_id = self.stream_ids_by_camera.get(camera_id)
+            existing_stream_state = self.stream_states.get(existing_stream_id or "")
+            if existing_stream_state is not None:
+                return {
+                    "camera": {"id": camera_id},
+                    "stream": existing_stream_state.build_control_payload(),
+                }
         self.stream_counter += 1
         stream_id = f"stream-{camera_id}-{self.stream_counter:03d}"
         stream_state = create_camera_stream_runtime_state(
@@ -202,6 +214,7 @@ class FakeSimManager:
         )
         stream_state.write_rgb_frame(rgba)
         self.stream_states[stream_id] = stream_state
+        self.stream_ids_by_camera[camera_id] = stream_id
         return {
             "camera": {"id": camera_id},
             "stream": stream_state.build_control_payload(),
@@ -212,6 +225,11 @@ class FakeSimManager:
         self.calls.append(("stop_camera_stream", (stream_id,), {}))
         stream_state = self.stream_states.pop(stream_id, None)
         if stream_state is not None:
+            self.stream_ids_by_camera = {
+                camera_id: active_stream_id
+                for camera_id, active_stream_id in self.stream_ids_by_camera.items()
+                if active_stream_id != stream_id
+            }
             stream_state.close()
         return {
             "stream": {"id": stream_id, "status": "stopped"},
@@ -301,13 +319,13 @@ class FakeSimManager:
                 {
                     "id": "left_plate",
                     "pose": {
-                        "position_xyz_m": [-0.34, 0.01, 1.5075],
+                        "position_xyz_m": [-0.5, 0.01, 1.5075],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+                    "bbox_size_xyz_m": [0.4, 0.4, 0.015],
                     "geometry": {
                         "type": "cylinder",
-                        "radius_m": 0.09,
+                        "radius_m": 0.2,
                         "height_m": 0.015,
                     },
                     "color": [0.15, 0.75, 0.85],
@@ -315,13 +333,13 @@ class FakeSimManager:
                 {
                     "id": "right_plate",
                     "pose": {
-                        "position_xyz_m": [0.34, 0.01, 1.5075],
+                        "position_xyz_m": [0.5, 0.01, 1.5075],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+                    "bbox_size_xyz_m": [0.4, 0.4, 0.015],
                     "geometry": {
                         "type": "cylinder",
-                        "radius_m": 0.09,
+                        "radius_m": 0.2,
                         "height_m": 0.015,
                     },
                     "color": [0.95, 0.55, 0.75],
@@ -340,9 +358,22 @@ class FakeSimManager:
                     "color": [1.0, 0.0, 0.0],
                 },
                 {
-                    "id": "blue_cube",
+                    "id": "yellow_cube",
                     "pose": {
                         "position_xyz_m": [0.0, 0.12, 1.57],
+                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+                    "geometry": {
+                        "type": "cuboid",
+                        "size_xyz_m": [0.08, 0.08, 0.08],
+                    },
+                    "color": [1.0, 1.0, 0.0],
+                },
+                {
+                    "id": "blue_cube",
+                    "pose": {
+                        "position_xyz_m": [0.14, 0.12, 1.57],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
                     "bbox_size_xyz_m": [0.08, 0.08, 0.08],
@@ -353,33 +384,21 @@ class FakeSimManager:
                     "color": [0.0, 0.0, 1.0],
                 },
                 {
-                    "id": "green_block",
+                    "id": "red_cylinder",
                     "pose": {
-                        "position_xyz_m": [0.14, 0.12, 1.56],
+                        "position_xyz_m": [-0.14, -0.1, 1.575],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.09],
                     "geometry": {
-                        "type": "cuboid",
-                        "size_xyz_m": [0.12, 0.08, 0.06],
+                        "type": "cylinder",
+                        "radius_m": 0.04,
+                        "height_m": 0.09,
                     },
-                    "color": [0.0, 1.0, 0.0],
+                    "color": [1.0, 0.0, 0.0],
                 },
                 {
-                    "id": "yellow_block",
-                    "pose": {
-                        "position_xyz_m": [-0.14, -0.1, 1.56],
-                        "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
-                    },
-                    "bbox_size_xyz_m": [0.10, 0.07, 0.06],
-                    "geometry": {
-                        "type": "cuboid",
-                        "size_xyz_m": [0.10, 0.07, 0.06],
-                    },
-                    "color": [1.0, 1.0, 0.0],
-                },
-                {
-                    "id": "purple_cylinder",
+                    "id": "yellow_cylinder",
                     "pose": {
                         "position_xyz_m": [0.0, -0.1, 1.575],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
@@ -390,27 +409,33 @@ class FakeSimManager:
                         "radius_m": 0.04,
                         "height_m": 0.09,
                     },
-                    "color": [0.6, 0.0, 0.8],
+                    "color": [1.0, 1.0, 0.0],
                 },
                 {
-                    "id": "orange_cylinder",
+                    "id": "blue_cylinder",
                     "pose": {
-                        "position_xyz_m": [0.14, -0.1, 1.5725],
+                        "position_xyz_m": [0.14, -0.1, 1.575],
                         "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
                     },
-                    "bbox_size_xyz_m": [0.084, 0.084, 0.085],
+                    "bbox_size_xyz_m": [0.08, 0.08, 0.09],
                     "geometry": {
                         "type": "cylinder",
-                        "radius_m": 0.042,
-                        "height_m": 0.085,
+                        "radius_m": 0.04,
+                        "height_m": 0.09,
                     },
-                    "color": [1.0, 0.5, 0.0],
+                    "color": [0.0, 0.0, 1.0],
                 },
             ]
         return []
 
 
 class _NeverDisconnectedRequest:
+    def __init__(self, *, consumer_registry: Any | None = None) -> None:
+        if consumer_registry is not None:
+            self.app = SimpleNamespace(
+                state=SimpleNamespace(mjpeg_stream_consumer_registry=consumer_registry)
+            )
+
     async def is_disconnected(self) -> bool:
         return False
 
@@ -694,6 +719,37 @@ def test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up(case_output_d
     assert any(call[0] == "stop_camera_stream" for call in fake_manager.calls)
 
 
+def test_stream_response_builder_reference_counts_reused_worker_stream(case_output_dir: Path) -> None:
+    from api.mjpeg_stream import MjpegStreamConsumerRegistry
+
+    fake_manager = _create_fake_manager(case_output_dir)
+    fake_manager.reuse_running_streams = True
+    consumer_registry = MjpegStreamConsumerRegistry()
+
+    first_response = build_mjpeg_streaming_response(
+        _NeverDisconnectedRequest(consumer_registry=consumer_registry),
+        fake_manager,
+        "table_top",
+    )
+    second_response = build_mjpeg_streaming_response(
+        _NeverDisconnectedRequest(consumer_registry=consumer_registry),
+        fake_manager,
+        "table_top",
+    )
+
+    asyncio.run(anext(first_response.body_iterator))
+    asyncio.run(anext(second_response.body_iterator))
+    asyncio.run(first_response.body_iterator.aclose())
+
+    stop_calls_after_first_close = [call for call in fake_manager.calls if call[0] == "stop_camera_stream"]
+    assert stop_calls_after_first_close == []
+
+    asyncio.run(second_response.body_iterator.aclose())
+
+    stop_calls = [call for call in fake_manager.calls if call[0] == "stop_camera_stream"]
+    assert stop_calls == [("stop_camera_stream", ("stream-table_top-001",), {})]
+
+
 def test_open_mjpeg_stream_unregisters_consumer_shared_memory(
     case_output_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -833,6 +889,41 @@ def test_request_validation_errors_are_wrapped_as_ok_false_json(case_output_dir:
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "body.task.objects" in response.json()["error_message"]
+
+
+def test_ignore_root_path_access_log_filter_only_drops_root_path() -> None:
+    access_log_filter = IgnoreRootPathAccessLogFilter()
+    root_record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:12345", "GET", "/", "1.1", 404),
+        exc_info=None,
+    )
+    root_query_record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:12345", "GET", "/?from=probe", "1.1", 404),
+        exc_info=None,
+    )
+    health_record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:12345", "GET", "/health", "1.1", 200),
+        exc_info=None,
+    )
+
+    assert access_log_filter.filter(root_record) is False
+    assert access_log_filter.filter(root_query_record) is False
+    assert access_log_filter.filter(health_record) is True
 
 
 def test_fastapi_real_integration_exercises_non_stream_interfaces(case_output_dir: Path) -> None:

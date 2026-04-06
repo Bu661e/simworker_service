@@ -16,10 +16,22 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from api.mjpeg_stream import build_mjpeg_streaming_response
+from api.mjpeg_stream import MjpegStreamConsumerRegistry, build_mjpeg_streaming_response
 from simworker import SimManager, SimManagerError
 
 logger = logging.getLogger("api")
+
+
+class IgnoreRootPathAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        raw_args = getattr(record, "args", ())
+        if not isinstance(raw_args, tuple) or len(raw_args) < 3:
+            return True
+        request_target = raw_args[2]
+        if not isinstance(request_target, str):
+            return True
+        request_path = request_target.split("?", 1)[0]
+        return request_path != "/"
 
 
 @dataclass(slots=True)
@@ -126,6 +138,7 @@ def create_app(
 ) -> FastAPI:
     resolved_settings = settings or ApiSettings.from_env()
     resolved_factory = sim_manager_factory or _build_sim_manager
+    _configure_access_log_filters()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -133,6 +146,7 @@ def create_app(
         app.state.settings = resolved_settings
         app.state.sim_manager = sim_manager
         app.state.capture_artifact_store = CaptureArtifactStore()
+        app.state.mjpeg_stream_consumer_registry = MjpegStreamConsumerRegistry()
         if start_manager_on_startup:
             sim_manager.ensure_started()
         try:
@@ -251,6 +265,13 @@ def _build_sim_manager(settings: ApiSettings) -> SimManager:
         request_timeout_sec=settings.request_timeout_sec,
         shutdown_timeout_sec=settings.shutdown_timeout_sec,
     )
+
+
+def _configure_access_log_filters() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(isinstance(current_filter, IgnoreRootPathAccessLogFilter) for current_filter in access_logger.filters):
+        return
+    access_logger.addFilter(IgnoreRootPathAccessLogFilter())
 
 
 def _get_sim_manager(request: Request) -> SimManagerLike:

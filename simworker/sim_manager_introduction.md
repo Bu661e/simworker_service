@@ -528,7 +528,7 @@ None
 - 如果当前还没加载环境，请求会真正执行加载。
 - 如果已经加载了同一个 `table_env_id`，会直接返回当前已加载环境。
 - 如果已经加载了另一个 `table_env_id`，会报错；调用方应先执行 `clear_table_env()`，再加载新的环境。
-- `multi_geometry` 当前会返回 8 个对象，其中包含 2 个固定分类圆盘 `left_plate` / `right_plate`。
+- `multi_geometry` 当前会返回 8 个对象，其中包含 2 个固定分类圆盘 `left_plate` / `right_plate`、3 个立方体和 3 个圆柱体。
 - 当前基础场景按机器人视角约定 `front = +y`、`back = -y`、`left = -x`、`right = +x`、`up = +z`；因此 `left_plate` 在 `x < 0`，`right_plate` 在 `x > 0`。
 
 #### `clear_table_env() -> dict[str, Any]`
@@ -613,7 +613,7 @@ None
 ```
 
 例如，在 `multi_geometry` 环境下，返回体里不同类型对象的 `objects` 条目可长这样
-（下面只节选盘子、立方体、长方体、圆柱体 4 个代表对象；完整返回时 `object_count` 仍为 `8`）：
+（下面只节选盘子、立方体、圆柱体 3 个代表对象；完整返回时 `object_count` 仍为 `8`）：
 
 ```python
 {
@@ -626,13 +626,13 @@ None
         {
             "id": "left_plate",
             "pose": {
-                "position_xyz_m": [-0.34, 0.01, 1.5075],
+                "position_xyz_m": [-0.5, 0.01, 1.5075],
                 "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
             },
-            "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+            "bbox_size_xyz_m": [0.4, 0.4, 0.015],
             "geometry": {
                 "type": "cylinder",
-                "radius_m": 0.09,
+                "radius_m": 0.2,
                 "height_m": 0.015,
             },
             "color": [0.15, 0.75, 0.85],
@@ -651,22 +651,22 @@ None
             "color": [1.0, 0.0, 0.0],
         },
         {
-            "id": "green_block",
+            "id": "yellow_cube",
             "pose": {
-                "position_xyz_m": [0.14, 0.12, 1.56],
+                "position_xyz_m": [0.0, 0.12, 1.57],
                 "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
             },
-            "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+            "bbox_size_xyz_m": [0.08, 0.08, 0.08],
             "geometry": {
                 "type": "cuboid",
-                "size_xyz_m": [0.12, 0.08, 0.06],
+                "size_xyz_m": [0.08, 0.08, 0.08],
             },
-            "color": [0.0, 1.0, 0.0],
+            "color": [1.0, 1.0, 0.0],
         },
         {
-            "id": "purple_cylinder",
+            "id": "blue_cylinder",
             "pose": {
-                "position_xyz_m": [0.0, -0.1, 1.575],
+                "position_xyz_m": [0.14, -0.1, 1.575],
                 "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
             },
             "bbox_size_xyz_m": [0.08, 0.08, 0.09],
@@ -675,7 +675,7 @@ None
                 "radius_m": 0.04,
                 "height_m": 0.09,
             },
-            "color": [0.6, 0.0, 0.8],
+            "color": [0.0, 0.0, 1.0],
         },
     ],
 }
@@ -689,7 +689,7 @@ None
 - `pose.position_xyz_m` 和 `pose.quaternion_wxyz` 都是 world 坐标系下的数据。
 - 这些数据是在查询时直接从 Isaac Sim 物体 handle 读取的，因此会反映物体当前真实状态。
 - 这个接口适合给上层做拍照后感知结果核对，也适合把对象信息传给 LLM。
-- `multi_geometry` 当前返回的 `objects` 会包含 2 个固定分类圆盘 `left_plate` / `right_plate`；如果上层只需要可抓取物体，应自行过滤。
+- `multi_geometry` 当前返回的 `objects` 会包含 2 个固定分类圆盘 `left_plate` / `right_plate`，以及红/黄/蓝三色的 3 个立方体和 3 个圆柱体；如果上层只需要可抓取物体，应自行过滤掉盘子。
 - `bbox_size_xyz_m` 表示对象局部坐标系下的包围盒尺寸，统一用米为单位。
 - `geometry` 用于补充对象形状参数；例如长方体返回 `type = "cuboid"` 和 `size_xyz_m`，圆柱体返回 `type = "cylinder"`、`radius_m`、`height_m`。
 - 对不规则真实物体，`geometry.type` 可为 `mesh`，同时通过 `bbox_size_xyz_m` 提供统一尺寸描述。

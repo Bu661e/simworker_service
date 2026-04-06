@@ -73,6 +73,13 @@
 - 启动流
 - 在结束时正确清理流
 
+#### `test_stream_response_builder_reference_counts_reused_worker_stream`
+
+验证当两个 HTTP MJPEG 请求复用同一条底层 worker stream 时：
+
+- 第一个请求断开不会提前 stop 底层流
+- 只有最后一个请求断开时才会真正 stop
+
 #### `test_open_mjpeg_stream_unregisters_consumer_shared_memory`
 
 验证 `_open_mjpeg_stream(...)` 在打开共享内存时，是否正确执行了 `resource_tracker.unregister(...)`，避免 Python 对共享内存生命周期做错误回收。
@@ -195,6 +202,8 @@ run_YYYYMMDD_HHMMSS
   对应 `api_capture_missing`
 - `test_stream_response_builder_returns_mjpeg_bytes_and_cleans_up`
   对应 `api_stream_builder`
+- `test_stream_response_builder_reference_counts_reused_worker_stream`
+  对应 `api_stream_refcount`
 - `test_open_mjpeg_stream_unregisters_consumer_shared_memory`
   对应 `api_open_mjpeg_stream`
 - `test_table_env_endpoints_delegate_to_sim_manager`

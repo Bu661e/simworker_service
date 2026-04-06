@@ -761,7 +761,7 @@ session_dir/
 - `default`
   由两个动态方块组成，适合最小联调和基础抓取验证。
 - `multi_geometry`
-  当前版本包含 8 个对象：2 个固定分类圆盘 `left_plate` / `right_plate`，以及 4 个长方体/立方体和 2 个圆柱体；适合简单几何体抓取、多目标识别和基础摆放联调。
+  当前版本包含 8 个对象：2 个固定分类圆盘 `left_plate` / `right_plate`，以及红/黄/蓝三色的 3 个立方体和 3 个圆柱体；适合简单几何体抓取、多目标识别和基础摆放联调。
 - `ycb`
   由硬编码 YCB 物体组成，当前优先使用 `/root/Download/YCB/Axis_Aligned_Physics/` 下的可抓取资产；如主机仍保留旧目录，也兼容 `/root/Downloads/YCB/Axis_Aligned_Physics/`。
 
@@ -932,7 +932,7 @@ session_dir/
 ```
 
 例如，在 `multi_geometry` 环境下，`payload.objects` 中不同类型对象的条目可以是下面这样
-（下面只节选盘子、立方体、长方体、圆柱体 4 类代表对象；完整返回时 `object_count` 仍为 `8`）：
+（下面只节选盘子、立方体、圆柱体 3 类代表对象；完整返回时 `object_count` 仍为 `8`）：
 
 ```json
 {
@@ -948,13 +948,13 @@ session_dir/
       {
         "id": "left_plate",
         "pose": {
-          "position_xyz_m": [-0.34, 0.01, 1.5075],
+          "position_xyz_m": [-0.5, 0.01, 1.5075],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.18, 0.18, 0.015],
+        "bbox_size_xyz_m": [0.4, 0.4, 0.015],
         "geometry": {
           "type": "cylinder",
-          "radius_m": 0.09,
+          "radius_m": 0.2,
           "height_m": 0.015
         },
         "color": [0.15, 0.75, 0.85]
@@ -973,22 +973,22 @@ session_dir/
         "color": [1.0, 0.0, 0.0]
       },
       {
-        "id": "green_block",
+        "id": "yellow_cube",
         "pose": {
-          "position_xyz_m": [0.14, 0.12, 1.56],
+          "position_xyz_m": [0.0, 0.12, 1.57],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.12, 0.08, 0.06],
+        "bbox_size_xyz_m": [0.08, 0.08, 0.08],
         "geometry": {
           "type": "cuboid",
-          "size_xyz_m": [0.12, 0.08, 0.06]
+          "size_xyz_m": [0.08, 0.08, 0.08]
         },
-        "color": [0.0, 1.0, 0.0]
+        "color": [1.0, 1.0, 0.0]
       },
       {
-        "id": "purple_cylinder",
+        "id": "blue_cylinder",
         "pose": {
-          "position_xyz_m": [0.0, -0.1, 1.575],
+          "position_xyz_m": [0.14, -0.1, 1.575],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
         "bbox_size_xyz_m": [0.08, 0.08, 0.09],
@@ -997,7 +997,7 @@ session_dir/
           "radius_m": 0.04,
           "height_m": 0.09
         },
-        "color": [0.6, 0.0, 0.8]
+        "color": [0.0, 0.0, 1.0]
       }
     ]
   }
@@ -1010,7 +1010,7 @@ session_dir/
 
 - 对 `physics.mode = "dynamic"` 的 `usd_asset`，返回的 `pose` 应理解为“当前世界位姿”，而不是最初请求里的生成位姿。
 - 这对可抓取 YCB 物体尤其重要：物体在落桌、碰撞稳定后，`pose` 可能与请求中的初始值略有偏差；如果上层是基于 simworker 当前场景做抓取规划，应优先使用这里返回的最新位姿。
-- `multi_geometry` 环境中的 `objects` 当前会返回 8 个对象，其中包括 2 个固定分类圆盘 `left_plate` / `right_plate`。
+- `multi_geometry` 环境中的 `objects` 当前会返回 8 个对象，其中包括 2 个固定分类圆盘 `left_plate` / `right_plate`，以及红/黄/蓝三色的 3 个立方体和 3 个圆柱体。
 - 如果上层只关心可抓取的小几何体，应自行按 `id` 过滤掉这两个分类圆盘。
 - `bbox_size_xyz_m` 表示对象局部坐标系下的包围盒尺寸，是统一的尺寸描述字段。
 - `geometry` 用于补充对象几何参数；规则几何体可直接返回尺寸或半径/高度，不规则物体可返回 `type = "mesh"` 和相关资产标识。
