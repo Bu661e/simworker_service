@@ -962,40 +962,40 @@ session_dir/
       {
         "id": "red_cube",
         "pose": {
-          "position_xyz_m": [-0.14, 0.12, 1.57],
+          "position_xyz_m": [-0.14, 0.12, 1.565],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+        "bbox_size_xyz_m": [0.07, 0.07, 0.07],
         "geometry": {
           "type": "cuboid",
-          "size_xyz_m": [0.08, 0.08, 0.08]
+          "size_xyz_m": [0.07, 0.07, 0.07]
         },
         "color": [1.0, 0.0, 0.0]
       },
       {
         "id": "yellow_cube",
         "pose": {
-          "position_xyz_m": [0.0, 0.12, 1.57],
+          "position_xyz_m": [0.0, 0.12, 1.565],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.08, 0.08, 0.08],
+        "bbox_size_xyz_m": [0.07, 0.07, 0.07],
         "geometry": {
           "type": "cuboid",
-          "size_xyz_m": [0.08, 0.08, 0.08]
+          "size_xyz_m": [0.07, 0.07, 0.07]
         },
         "color": [1.0, 1.0, 0.0]
       },
       {
         "id": "blue_cylinder",
         "pose": {
-          "position_xyz_m": [0.14, -0.1, 1.575],
+          "position_xyz_m": [0.14, -0.1, 1.565],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.08, 0.08, 0.09],
+        "bbox_size_xyz_m": [0.08, 0.08, 0.07],
         "geometry": {
           "type": "cylinder",
           "radius_m": 0.04,
-          "height_m": 0.09
+          "height_m": 0.07
         },
         "color": [0.0, 0.0, 1.0]
       }

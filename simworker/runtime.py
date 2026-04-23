@@ -16,7 +16,7 @@ from simworker.table_environments import ensure_supported_table_environment_id, 
 
 _CAMERA_CAPTURE_RENDER_STEPS = 2
 _TABLE_ENV_CLEAR_RENDER_STEPS = 2
-_STREAM_LOOP_RENDER_PERIOD_SEC = 1.0 / 30.0
+_STREAM_LOOP_RENDER_PERIOD_SEC = 1.0 / 13.0
 _STREAM_LOOP_IDLE_WAIT_SEC = 0.50
 
 
