@@ -991,10 +991,10 @@ session_dir/
           "position_xyz_m": [0.14, -0.1, 1.565],
           "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
         },
-        "bbox_size_xyz_m": [0.08, 0.08, 0.07],
+        "bbox_size_xyz_m": [0.06, 0.06, 0.07],
         "geometry": {
           "type": "cylinder",
-          "radius_m": 0.04,
+          "radius_m": 0.03,
           "height_m": 0.07
         },
         "color": [0.0, 0.0, 1.0]
